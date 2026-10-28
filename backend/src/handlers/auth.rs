@@ -25,7 +25,7 @@ use axum::http::HeaderMap;
 use std::sync::Arc;
 
 /// Serializes the first-account admin decision. See the signup transaction.
-const FIRST_ACCOUNT_ADMIN_LOCK: i64 = 1_557_021_001;
+pub(crate) const FIRST_ACCOUNT_ADMIN_LOCK: i64 = 1_557_021_001;
 
 #[derive(Deserialize, Validate, ToSchema)]
 pub struct RegisterRequest {

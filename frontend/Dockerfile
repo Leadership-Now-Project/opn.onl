@@ -3,6 +3,8 @@
 FROM nginx:alpine AS csp-config
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Per-deployment locations are mounted here; empty in the stock image.
+RUN mkdir -p /etc/nginx/site.d
 
 # Bake the API origin into the CSP connect-src. The frontend fetches the API
 # cross-origin (VITE_API_URL, e.g. https://l.opn.onl), so the document CSP must
@@ -65,9 +67,12 @@ COPY . .
 # Set build-time environment variables (API URLs are baked in at build time)
 ARG VITE_API_URL
 ARG VITE_FRONTEND_URL
+# "true" on a build for an instance behind Cloudflare Access (see Login.tsx).
+ARG VITE_CF_ACCESS
 
 ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_FRONTEND_URL=$VITE_FRONTEND_URL
+ENV VITE_CF_ACCESS=$VITE_CF_ACCESS
 
 # Build the application with prerendering. The Playwright Chromium path
 # contains a version segment, so resolve it at build time; puppeteer picks it

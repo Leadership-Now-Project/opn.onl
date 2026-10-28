@@ -23,12 +23,30 @@ export default function Login() {
     const [passkeysEnabled, setPasskeysEnabled] = useState(true);
     const navigate = useNavigate();
 
-    // Redirect to dashboard if already logged in
+    // Redirect to dashboard if already logged in. Otherwise, on a build for an
+    // instance behind Cloudflare Access (VITE_CF_ACCESS=true), sign in as the
+    // person Access already let through. If that fails the form below is used.
     useEffect(() => {
         const token = safeLocalStorage.getItem('token');
         if (token) {
             navigate('/dashboard', { replace: true });
+            return;
         }
+        if (import.meta.env.VITE_CF_ACCESS !== 'true') return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(API_ENDPOINTS.cfAccess, { method: 'POST' });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (cancelled || !safeLocalStorage.setItem('token', data.token)) return;
+                safeLocalStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
+                navigate('/dashboard', { replace: true });
+            } catch {
+                // Not behind Access, or offline: the form below still works.
+            }
+        })();
+        return () => { cancelled = true; };
     }, [navigate]);
 
     useEffect(() => {

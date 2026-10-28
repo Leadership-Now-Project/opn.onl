@@ -87,6 +87,37 @@ describe('Login Page', () => {
     });
   });
 
+  it('does not ask Cloudflare Access unless the build turns it on', async () => {
+    render(<Login />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('/auth/cf-access'),
+      expect.anything()
+    );
+  });
+
+  it('signs in through Cloudflare Access on a build that turns it on', async () => {
+    vi.stubEnv('VITE_CF_ACCESS', 'true');
+    try {
+      vi.mocked(global.fetch).mockResolvedValue(
+        mockFetchResponse({ token: mockToken, is_admin: true }) as any
+      );
+
+      render(<Login />);
+
+      await waitFor(() => {
+        expect(global.fetch).toHaveBeenCalledWith(
+          expect.stringContaining('/auth/cf-access'),
+          expect.objectContaining({ method: 'POST' })
+        );
+        expect(localStorage.setItem).toHaveBeenCalledWith('token', mockToken);
+        expect(localStorage.setItem).toHaveBeenCalledWith('is_admin', 'true');
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('stores admin metadata on successful passkey login', async () => {
     Object.defineProperty(window, 'PublicKeyCredential', {
       configurable: true,

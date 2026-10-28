@@ -414,6 +414,7 @@ pub fn build_router(app_state: AppState) -> Router {
         // Authentication routes
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
+        .route("/auth/cf-access", post(handlers::cf_access::cf_access_login))
         .route("/auth/verify-email", post(handlers::auth::verify_email))
         .route(
             "/auth/resend-verification",

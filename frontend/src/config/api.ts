@@ -25,6 +25,9 @@ export const API_ENDPOINTS = {
     // Auth
     register: `${API_BASE_URL}/auth/register`,
     login: `${API_BASE_URL}/auth/login`,
+    // Sign-in as the person Cloudflare Access let through; 404 when the
+    // instance does not use it.
+    cfAccess: `${API_BASE_URL}/auth/cf-access`,
     verifyEmail: `${API_BASE_URL}/auth/verify-email`,
     resendVerification: `${API_BASE_URL}/auth/resend-verification`,
     forgotPassword: `${API_BASE_URL}/auth/forgot-password`,

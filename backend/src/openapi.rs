@@ -2,8 +2,8 @@ use utoipa::{OpenApi, ToResponse, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers::{
-    admin, analytics, api_keys, auth, bio, contact, folders, links, organizations, passkeys,
-    reports, tags,
+    admin, analytics, api_keys, auth, bio, cf_access, contact, folders, links, organizations,
+    passkeys, reports, tags,
 };
 
 /// `info.description` of the served document (Markdown), set in [`api_doc`].
@@ -122,6 +122,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
         // Authentication
         auth::register,
         auth::login,
+        cf_access::cf_access_login,
         auth::verify_email,
         auth::resend_verification,
         auth::forgot_password,
