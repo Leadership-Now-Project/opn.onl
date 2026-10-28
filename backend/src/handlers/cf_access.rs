@@ -231,7 +231,10 @@ async fn verify_with_refresh(
 )]
 pub async fn cf_access_login(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(config) = CONFIG.as_ref() else {
-        return json_error(StatusCode::NOT_FOUND, "Cloudflare Access sign-in is not enabled");
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "Cloudflare Access sign-in is not enabled",
+        );
     };
     let Some(token) = headers
         .get(ASSERTION_HEADER)
@@ -245,12 +248,14 @@ pub async fn cf_access_login(State(state): State<AppState>, headers: HeaderMap) 
         Ok(email) => email,
         Err(reason) => {
             let (status, detail) = match reason {
-                AssertionError::EmailDomainNotAllowed => {
-                    (StatusCode::FORBIDDEN, "email domain not allowed".to_string())
-                }
-                AssertionError::UnknownKey => {
-                    (StatusCode::UNAUTHORIZED, "signed by an unknown key".to_string())
-                }
+                AssertionError::EmailDomainNotAllowed => (
+                    StatusCode::FORBIDDEN,
+                    "email domain not allowed".to_string(),
+                ),
+                AssertionError::UnknownKey => (
+                    StatusCode::UNAUTHORIZED,
+                    "signed by an unknown key".to_string(),
+                ),
                 AssertionError::Invalid(detail) => (StatusCode::UNAUTHORIZED, detail),
             };
             tracing::warn!("Cloudflare Access token refused: {detail}");
@@ -280,7 +285,10 @@ pub async fn cf_access_login(State(state): State<AppState>, headers: HeaderMap) 
             .into_response(),
         Err(e) => {
             tracing::error!("Failed to create JWT: {}", e);
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create session")
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create session",
+            )
         }
     }
 }
@@ -351,7 +359,10 @@ async fn find_or_create_user(
         database_error()
     })?;
     txn.commit().await.map_err(|_| database_error())?;
-    tracing::info!(user_id = user.id, "Account created through Cloudflare Access");
+    tracing::info!(
+        user_id = user.id,
+        "Account created through Cloudflare Access"
+    );
     Ok(user)
 }
 
@@ -434,7 +445,11 @@ mod tests {
     #[test]
     fn valid_token_yields_normalised_email() {
         let key = test_key("k1");
-        let t = token(&key, "k1", claims("Jane@LeadershipNowProject.org", AUD, TEAM));
+        let t = token(
+            &key,
+            "k1",
+            claims("Jane@LeadershipNowProject.org", AUD, TEAM),
+        );
         assert_eq!(
             verify_assertion(&t, &key.jwks, &config(None)),
             Ok("jane@leadershipnowproject.org".to_string())
@@ -445,7 +460,10 @@ mod tests {
     fn wrong_audience_or_issuer_is_refused() {
         let key = test_key("k1");
         let evil = "https://evil.cloudflareaccess.com";
-        for c in [claims("a@x.org", "other-aud", TEAM), claims("a@x.org", AUD, evil)] {
+        for c in [
+            claims("a@x.org", "other-aud", TEAM),
+            claims("a@x.org", AUD, evil),
+        ] {
             let t = token(&key, "k1", c);
             assert!(matches!(
                 verify_assertion(&t, &key.jwks, &config(None)),
