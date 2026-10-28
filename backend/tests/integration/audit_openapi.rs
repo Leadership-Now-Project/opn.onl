@@ -587,6 +587,8 @@ async fn a_single_link_can_be_read_by_id() {
 const PUBLIC_OPERATIONS: &[(&str, &str)] = &[
     ("POST", "/auth/register"),
     ("POST", "/auth/login"),
+    // Authenticated by the Cloudflare Access header, not a bearer token.
+    ("POST", "/auth/cf-access"),
     ("POST", "/auth/verify-email"),
     ("POST", "/auth/forgot-password"),
     ("POST", "/auth/reset-password"),
