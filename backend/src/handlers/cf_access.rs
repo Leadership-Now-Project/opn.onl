@@ -265,7 +265,7 @@ pub async fn cf_access_login(State(state): State<AppState>, headers: HeaderMap) 
 
     let user = match find_or_create_user(&state.db, &email).await {
         Ok(user) => user,
-        Err(response) => return response,
+        Err((status, message)) => return json_error(status, message),
     };
     if user.is_disabled() {
         return json_error(StatusCode::FORBIDDEN, "This account is disabled");
@@ -293,14 +293,17 @@ pub async fn cf_access_login(State(state): State<AppState>, headers: HeaderMap) 
     }
 }
 
-fn database_error() -> Response {
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+/// A refusal from [`find_or_create_user`]: status and public message.
+type Refusal = (StatusCode, &'static str);
+
+fn database_error() -> Refusal {
+    (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
 }
 
 async fn find_or_create_user(
     db: &DatabaseConnection,
     email: &str,
-) -> Result<users::Model, Response> {
+) -> Result<users::Model, Refusal> {
     if let Some(user) = live_users_by_email(email)
         .one(db)
         .await
@@ -308,13 +311,13 @@ async fn find_or_create_user(
     {
         ensure_sign_in_domain_allowed(db, email)
             .await
-            .map_err(|r| json_error(StatusCode::FORBIDDEN, r.public_message()))?;
+            .map_err(|r| (StatusCode::FORBIDDEN, r.public_message()))?;
         return Ok(user);
     }
 
     ensure_email_domain_allowed(db, email)
         .await
-        .map_err(|r| json_error(StatusCode::FORBIDDEN, r.public_message()))?;
+        .map_err(|r| (StatusCode::FORBIDDEN, r.public_message()))?;
     // Nobody knows this password; Access is the way in.
     let password_hash = hash_password(&generate_token())
         .await
