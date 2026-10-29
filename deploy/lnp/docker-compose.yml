@@ -122,12 +122,28 @@ services:
     logging: *default-logging
 
   frontend-admin:
-    image: ghcr.io/leadership-now-project/opn-frontend-admin:${OPN_TAG}
+    # OPN_ADMIN_TAG pins the dashboard while a newer one is previewed.
+    image: ghcr.io/leadership-now-project/opn-frontend-admin:${OPN_ADMIN_TAG:-${OPN_TAG}}
     restart: unless-stopped
     depends_on:
       - backend
     ports:
       - "127.0.0.1:3102:80"
+    volumes:
+      - ./nginx/admin.conf:/etc/nginx/site.d/lnp.conf:ro
+    logging: *default-logging
+
+  # A newer dashboard beside the live one, for whoever sets the preview cookie
+  # (the edge proxy routes /__preview/on and /__preview/off). Started only with
+  # `docker compose --profile preview up -d`; OPN_PREVIEW_TAG picks the image.
+  frontend-admin-preview:
+    image: ghcr.io/leadership-now-project/opn-frontend-admin:${OPN_PREVIEW_TAG:-${OPN_TAG}}
+    profiles: ["preview"]
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:3103:80"
     volumes:
       - ./nginx/admin.conf:/etc/nginx/site.d/lnp.conf:ro
     logging: *default-logging
