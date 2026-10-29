@@ -3,8 +3,9 @@
 @tailwind utilities;
 
 :root {
-  --font-display: 'Bricolage Grotesque', Georgia, serif;
-  --font-body: 'Hanken Grotesk', system-ui, -apple-system, sans-serif;
+  /* From tailwind.config.js, so a build-time theme (VITE_THEME) applies here too. */
+  --font-display: theme('fontFamily.display');
+  --font-body: theme('fontFamily.sans');
   font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -18,8 +19,7 @@ html {
 }
 
 body {
-  background-color: oklch(0.986 0.004 266);
-  color: oklch(0.235 0.021 266);
+  @apply bg-paper text-ink;
   font-feature-settings: "cv11", "ss01";
 }
 

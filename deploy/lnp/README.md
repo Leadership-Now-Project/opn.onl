@@ -16,6 +16,7 @@ Kept small so they carry across upstream releases:
 - `backend/src/handlers/cf_access.rs` (new): `POST /auth/cf-access` signs in the person Cloudflare Access authenticated, from the `Cf-Access-Jwt-Assertion` header. Off unless `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set. Registered in `handlers/mod.rs`, `lib.rs` and `openapi.rs`; `FIRST_ACCOUNT_ADMIN_LOCK` in `auth.rs` is `pub(crate)` so both sign-up paths share it.
 - `frontend/src/pages/Login.tsx`: a build with `VITE_CF_ACCESS=true` calls that endpoint on load. `frontend/src/config/api.ts` names the endpoint.
 - `frontend/nginx.conf` and `frontend/Dockerfile`: an `include /etc/nginx/site.d/*.conf;` point (empty in the stock image) and the `VITE_CF_ACCESS` build arg.
+- `frontend/themes/lnp.js` and `frontend/themes/lnp/public/` (new): the Leadership Now Project look (navy, grey, Plus Jakarta Sans, square corners, LNP logo and icons), applied only when the frontend is built with `VITE_THEME=lnp` (the dashboard image). `tailwind.config.js` merges it in; `src/index.css` takes its body colours and fonts from the config; `Logo.tsx` shows the LNP logo; the Dockerfile copies the theme's icons over the stock ones. `src/designTokens.lnp.test.ts` checks its colours for WCAG AA contrast.
 - `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only.
 
 The first account to sign in becomes the instance admin.

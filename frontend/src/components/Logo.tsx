@@ -5,6 +5,14 @@ interface LogoProps {
 }
 
 export default function Logo({ className = "h-8", iconOnly = false, showFull = false }: LogoProps) {
+    // LNP theme: the Leadership Now Project logo already carries the name.
+    if (import.meta.env.VITE_THEME === 'lnp') {
+        return (
+            <div className={`flex items-center ${className}`}>
+                <img src="/logo.png" alt="Leadership Now Project" className="h-8 w-auto" />
+            </div>
+        );
+    }
     return (
         <div className={`flex items-center gap-2.5 ${className}`}>
             <img

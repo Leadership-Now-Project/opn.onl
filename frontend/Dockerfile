@@ -69,10 +69,15 @@ ARG VITE_API_URL
 ARG VITE_FRONTEND_URL
 # "true" on a build for an instance behind Cloudflare Access (see Login.tsx).
 ARG VITE_CF_ACCESS
+# "lnp" for the Leadership Now Project theme (themes/lnp.js, themes/lnp/public).
+ARG VITE_THEME
 
 ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_FRONTEND_URL=$VITE_FRONTEND_URL
 ENV VITE_CF_ACCESS=$VITE_CF_ACCESS
+ENV VITE_THEME=$VITE_THEME
+# A theme's own logo and icons replace the stock ones in public/.
+RUN if [ -n "$VITE_THEME" ] && [ -d "themes/$VITE_THEME/public" ]; then cp -r "themes/$VITE_THEME/public/." public/; fi
 
 # Build the application with prerendering. The Playwright Chromium path
 # contains a version segment, so resolve it at build time; puppeteer picks it

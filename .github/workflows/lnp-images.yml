@@ -49,6 +49,7 @@ jobs:
               VITE_API_URL=https://links.leadershipnowproject.com/api
               VITE_FRONTEND_URL=https://ldr.now
               VITE_CF_ACCESS=true
+              VITE_THEME=lnp
     steps:
       - uses: actions/checkout@v4
 
