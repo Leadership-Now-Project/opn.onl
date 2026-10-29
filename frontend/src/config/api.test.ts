@@ -8,6 +8,7 @@ import {
     authFetch,
     errorText,
     failureMessage,
+    externalLogoutUrl,
     shortLinkBase,
     shortLinkHost,
     responseError,
@@ -425,5 +426,20 @@ describe('totalCount', () => {
         expect(totalCount(withHeader('many'))).toBeNull();
         expect(totalCount(withHeader('-3'))).toBeNull();
         expect(totalCount(withHeader('1.5'))).toBeNull();
+    });
+});
+
+describe('externalLogoutUrl', () => {
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
+    it('is null on a normal build, so the app logs out by itself', () => {
+        expect(externalLogoutUrl()).toBeNull();
+    });
+
+    it("is Cloudflare Access's logout address on a build behind Access", () => {
+        vi.stubEnv('VITE_CF_ACCESS', 'true');
+        expect(externalLogoutUrl()).toBe('/cdn-cgi/access/logout');
     });
 });

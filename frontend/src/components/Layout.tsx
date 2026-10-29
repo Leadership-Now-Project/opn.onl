@@ -3,6 +3,8 @@ import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Github, LogOut, Menu, X, User, Settings, LayoutDashboard, BarChart2, Shield, Users } from 'lucide-react';
 import Logo from './Logo';
 import { safeLocalStorage } from '../utils/storage';
+import { externalLogoutUrl } from '../config/api';
+import { IS_LNP, SOURCE_URL } from '../config/theme';
 
 export default function Layout() {
     const navigate = useNavigate();
@@ -23,6 +25,11 @@ export default function Layout() {
         safeLocalStorage.removeItem('token');
         safeLocalStorage.removeItem('is_admin');
         closeMenus();
+        const external = externalLogoutUrl();
+        if (external) {
+            window.location.assign(external);
+            return;
+        }
         navigate('/login');
     };
 
@@ -32,7 +39,8 @@ export default function Layout() {
         }
     };
 
-    const navLinks = [
+    // The LNP dashboard is a staff tool: no links to opn.onl's own marketing pages.
+    const navLinks = IS_LNP ? [] : [
         { href: '/features', label: 'Features' },
         { href: '/pricing', label: 'Pricing' },
         { href: '/developers', label: 'Developers' },
@@ -73,15 +81,17 @@ export default function Layout() {
                         </nav>
 
                         <div className="hidden md:flex items-center gap-5">
-                            <a
-                                href="https://github.com/ysalitrynskyi/opn.onl"
-                                target="_blank"
-                                rel="noreferrer"
-                                aria-label="View source on GitHub"
-                                className="text-faint transition-colors hover:text-ink"
-                            >
-                                <Github className="h-5 w-5" />
-                            </a>
+                            {!IS_LNP && (
+                                <a
+                                    href={SOURCE_URL}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    aria-label="View source on GitHub"
+                                    className="text-faint transition-colors hover:text-ink"
+                                >
+                                    <Github className="h-5 w-5" />
+                                </a>
+                            )}
 
                             {token ? (
                                 <div className="relative">
@@ -200,9 +210,11 @@ export default function Layout() {
                                     <Link to="/register" className="rounded-xl bg-primary-600 px-4 py-2.5 text-center text-base font-semibold text-white">Sign up</Link>
                                 </div>
                             )}
-                            <a href="https://github.com/ysalitrynskyi/opn.onl" target="_blank" rel="noreferrer" className="flex items-center gap-2 px-2 pt-3 text-sm text-faint">
-                                <Github className="h-5 w-5" /> View on GitHub
-                            </a>
+                            {!IS_LNP && (
+                                <a href={SOURCE_URL} target="_blank" rel="noreferrer" className="flex items-center gap-2 px-2 pt-3 text-sm text-faint">
+                                    <Github className="h-5 w-5" /> View on GitHub
+                                </a>
+                            )}
                         </div>
                     </div>
                 )}
@@ -214,6 +226,17 @@ export default function Layout() {
                 <Outlet />
             </main>
 
+            {IS_LNP ? (
+            <footer className="border-t border-line bg-surface">
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-faint">
+                    <p>© {new Date().getFullYear()} Leadership Now Project</p>
+                    <p>
+                        Powered by opn.onl (AGPL-3.0) ·{' '}
+                        <a href={SOURCE_URL} target="_blank" rel="noreferrer" className="hover:text-ink underline">Source</a>
+                    </p>
+                </div>
+            </footer>
+            ) : (
             <footer className="border-t border-line bg-surface">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
@@ -256,6 +279,7 @@ export default function Layout() {
                     </div>
                 </div>
             </footer>
+            )}
         </div>
     );
 }

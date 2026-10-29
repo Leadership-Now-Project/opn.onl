@@ -1,5 +1,7 @@
+import lnpTheme from './themes/lnp.js'
+
 /** @type {import('tailwindcss').Config} */
-export default {
+const config = {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -70,3 +72,14 @@ export default {
   },
   plugins: [],
 }
+
+// LNP: VITE_THEME=lnp swaps the palette, fonts and corner sizes at build time
+// (themes/lnp.js). Any other value leaves the theme above untouched.
+if (process.env.VITE_THEME === 'lnp') {
+  const ext = config.theme.extend
+  ext.colors = { ...ext.colors, ...lnpTheme.colors }
+  ext.fontFamily = { ...ext.fontFamily, ...lnpTheme.fontFamily }
+  ext.borderRadius = { ...ext.borderRadius, ...lnpTheme.borderRadius }
+}
+
+export default config

@@ -414,6 +414,10 @@ pub fn build_router(app_state: AppState) -> Router {
         // Authentication routes
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
+        .route(
+            "/auth/cf-access",
+            post(handlers::cf_access::cf_access_login),
+        )
         .route("/auth/verify-email", post(handlers::auth::verify_email))
         .route(
             "/auth/resend-verification",
@@ -492,6 +496,10 @@ pub fn build_router(app_state: AppState) -> Router {
         )
         .route("/links/build-utm", post(handlers::links::build_utm_url))
         .route("/links/sparklines", get(handlers::links::get_sparklines))
+        .route(
+            "/links/preview-image",
+            get(handlers::preview_image::preview_image),
+        )
         .route(
             "/links/preview-metadata",
             post(handlers::links::get_link_preview_metadata),

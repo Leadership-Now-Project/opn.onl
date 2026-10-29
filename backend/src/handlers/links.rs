@@ -344,7 +344,7 @@ fn check_link_text(title: Option<&str>, notes: Option<&str>) -> Result<(), Strin
 }
 
 /// Validate URL is http/https only and sanitize if enabled
-fn validate_url(url: &str) -> Result<String, String> {
+pub(crate) fn validate_url(url: &str) -> Result<String, String> {
     // Raw CR/LF (and other controls) survive `Url::parse` and then break the
     // redirect response, so one visit can be retried into several clicks.
     if url.chars().any(|c| c.is_ascii_control()) {
@@ -610,7 +610,7 @@ fn build_pinned_client(
 /// resolved, validated, and then connected to via a DNS-pinned client, so the
 /// connected IP is always the validated IP (DNS rebinding cannot open a gap
 /// between the check and the connect). Returns the final response.
-async fn ssrf_guarded_fetch(
+pub(crate) async fn ssrf_guarded_fetch(
     method: reqwest::Method,
     start_url: &str,
     user_agent: Option<&str>,
@@ -6658,8 +6658,16 @@ pub async fn check_url_health(
     let start = std::time::Instant::now();
 
     // SSRF-guarded HEAD: the host and every redirect hop are validated against
-    // private/internal address ranges before any request is sent.
-    match ssrf_guarded_fetch(reqwest::Method::HEAD, &payload.url, None).await {
+    // private/internal address ranges before any request is sent. It identifies
+    // itself like the preview fetch below: many sites (Cloudflare's bot rules
+    // among them) refuse a request with no User-Agent at all with a 403.
+    match ssrf_guarded_fetch(
+        reqwest::Method::HEAD,
+        &payload.url,
+        Some("Mozilla/5.0 (compatible; OPN.ONL LinkPreview/1.0)"),
+    )
+    .await
+    {
         Ok(response) => {
             let elapsed = start.elapsed().as_millis() as u64;
             let status = response.status().as_u16();
@@ -7017,7 +7025,7 @@ pub struct AvatarProxyQuery {
 /// each (never the raw upstream header). SVG is deliberately excluded. The
 /// handler additionally sends `X-Content-Type-Options: nosniff` and a locked-down
 /// CSP so even a mislabeled body cannot execute.
-fn canonical_avatar_content_type(raw: &str) -> Option<&'static str> {
+pub(crate) fn canonical_avatar_content_type(raw: &str) -> Option<&'static str> {
     // Strip any `; charset=…` parameter and normalize case/whitespace.
     let base = raw
         .split(';')

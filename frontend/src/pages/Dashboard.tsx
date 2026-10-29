@@ -1072,6 +1072,7 @@ export default function Dashboard() {
                     tags={tags}
                     orgId={orgId}
                     orgName={activeOrgName}
+                    onCatalogChanged={(kind) => { void loadScopedList(kind, orgId); }}
                 />
             )}
 

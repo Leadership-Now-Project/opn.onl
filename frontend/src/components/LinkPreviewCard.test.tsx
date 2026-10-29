@@ -111,6 +111,37 @@ describe('LinkPreviewCard', () => {
             });
             expect(container.querySelector('img')).not.toBeInTheDocument();
         });
+
+        it('shows the preview image through the server, never from the image host', async () => {
+            const createObjectURL = vi.fn(() => 'blob:preview-1');
+            const revokeObjectURL = vi.fn();
+            Object.assign(URL, { createObjectURL, revokeObjectURL });
+            mockFetch
+                .mockResolvedValueOnce({
+                    ok: true,
+                    json: () => Promise.resolve({
+                        url: 'https://example.com',
+                        title: 'With Image',
+                        description: null,
+                        image: 'https://cdn.example.com/og.png',
+                        site_name: 'Example',
+                        favicon: null,
+                    }),
+                })
+                .mockResolvedValueOnce({ ok: true, blob: () => Promise.resolve(new Blob(['png'])) });
+
+            const { container } = render(<LinkPreviewCard url="https://example.com" />);
+
+            await waitFor(() => {
+                expect(container.querySelector('img')).toHaveAttribute('src', 'blob:preview-1');
+            });
+            const imageRequest = String(mockFetch.mock.calls[1][0]);
+            expect(imageRequest).toContain('/links/preview-image?');
+            expect(imageRequest).toContain(encodeURIComponent('https://cdn.example.com/og.png'));
+            for (const img of container.querySelectorAll('img')) {
+                expect(img.getAttribute('src')).not.toContain('cdn.example.com');
+            }
+        });
     });
 
     describe('error handling', () => {
