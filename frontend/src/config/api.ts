@@ -15,6 +15,15 @@ export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:30
 export const shortLinkBase = (): string =>
     (import.meta.env.VITE_FRONTEND_URL || window.location.origin).replace(/\/+$/, '');
 
+/**
+ * Where logging out has to go to end the session for real, or null when the
+ * app's own logout is enough. Behind Cloudflare Access (VITE_CF_ACCESS=true)
+ * the login page signs straight back in while the Access session lasts, so
+ * logout must also end that session at Cloudflare's logout address.
+ */
+export const externalLogoutUrl = (): string | null =>
+    import.meta.env.VITE_CF_ACCESS === 'true' ? '/cdn-cgi/access/logout' : null;
+
 /** shortLinkBase() without the scheme, for display: "links.example.org". */
 export const shortLinkHost = (): string => shortLinkBase().replace(/^https?:\/\//, '');
 
