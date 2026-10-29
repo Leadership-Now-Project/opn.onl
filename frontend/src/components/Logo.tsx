@@ -1,3 +1,5 @@
+import { IS_LNP } from '../config/theme';
+
 interface LogoProps {
     className?: string;
     iconOnly?: boolean;
@@ -6,7 +8,7 @@ interface LogoProps {
 
 export default function Logo({ className = "h-8", iconOnly = false, showFull = false }: LogoProps) {
     // LNP theme: the Leadership Now Project logo already carries the name.
-    if (import.meta.env.VITE_THEME === 'lnp') {
+    if (IS_LNP) {
         return (
             <div className={`flex items-center ${className}`}>
                 <img src="/logo.png" alt="Leadership Now Project" className="h-8 w-auto" />

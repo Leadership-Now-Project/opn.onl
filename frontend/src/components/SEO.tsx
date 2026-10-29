@@ -2,6 +2,7 @@ import { Helmet } from 'react-helmet-async';
 import { version as APP_VERSION } from '../../package.json';
 import { SEO_TAG_ATTRIBUTE } from '../utils/prerenderedHead';
 import { normalizeSiteUrl } from '../utils/siteUrl';
+import { IS_LNP, SITE_NAME } from '../config/theme';
 
 interface SEOProps {
   title?: string;
@@ -39,8 +40,8 @@ export default function SEO({
   breadcrumbs,
 }: SEOProps) {
   const fullTitle = title === 'opn.onl - Open Source URL Shortener'
-    ? title
-    : `${title} | opn.onl`;
+    ? (IS_LNP ? SITE_NAME : title)
+    : `${title} | ${SITE_NAME}`;
 
   // Resolve the canonical URL to an absolute one. Pages may pass a route-relative
   // path (e.g. "/features") or an already-absolute URL; a relative path is joined
