@@ -35,6 +35,8 @@ On the server, in a copy of this folder:
     cp .env.example .env && chmod 600 .env   # fill in secrets and OPN_TAG
     docker compose pull && docker compose up -d
 
+After changing a file in `nginx/`, restart that container (`docker compose restart frontend-public` or `frontend-admin`). `nginx -s reload` inside the container does not pick up the change, because the file is bind-mounted and replaced, not edited in place.
+
 The host's reverse proxy sends `ldr.now` to 127.0.0.1:3101 and `links.leadershipnowproject.com` to 127.0.0.1:3102. It must pass `Host`, `X-Forwarded-Proto: https` and Cloudflare's headers through unchanged (`FORCE_HTTPS` redirects anything that does not arrive as https).
 
 ## Updating from upstream
