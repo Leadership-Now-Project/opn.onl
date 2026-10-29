@@ -108,18 +108,31 @@ const CHECK_FAILED = 'Could not check this destination';
  * rather than a target we can name. Any other failure (a 429, a 500) is read
  * like every other API error.
  */
+/** What an HTTP error from the destination means for whoever made the link. */
+function refusalText(code: number): string {
+    if (code === 401 || code === 403) {
+        return `The site refused our automatic check (HTTP ${code}). It may still open normally in a browser: open the link to make sure.`;
+    }
+    if (code === 404 || code === 410) return `Page not found (HTTP ${code}). Check the address.`;
+    if (code === 429) return `The site is limiting requests right now (HTTP ${code}). Try the check again later.`;
+    if (code >= 500) return `The site had an error (HTTP ${code}). It may be down for now; try again later.`;
+    return `The site answered with an error (HTTP ${code}).`;
+}
+
 export function statusFromHealth(
     httpStatus: number,
     data: Partial<UrlHealthResponse> | { error?: string | null } | null,
 ): DestinationStatus {
     if (!data) return { ok: false, text: CHECK_FAILED };
     const body = data as Partial<UrlHealthResponse>;
+    const code = body.status_code;
     if (body.reachable) {
-        const code = body.status_code;
-        if (code != null && code >= 300 && code < 400) return { ok: true, text: `Redirect · HTTP ${code}` };
-        if (code != null) return { ok: true, text: `Reachable · HTTP ${code}` };
-        return { ok: true, text: 'Reachable' };
+        if (code != null && code >= 300 && code < 400) return { ok: true, text: `Page found: it redirects onward (HTTP ${code})` };
+        if (code != null) return { ok: true, text: `Page found (HTTP ${code})` };
+        return { ok: true, text: 'Page found' };
     }
+    // The site answered, but not with the page: say what that means in words.
+    if (code != null) return { ok: false, text: refusalText(code) };
     const httpOk = httpStatus >= 200 && httpStatus < 300;
     if (body.error || !httpOk) return { ok: false, text: errorText(httpStatus, data, CHECK_FAILED) };
     return { ok: false, text: 'Unreachable' };

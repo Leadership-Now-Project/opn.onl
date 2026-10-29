@@ -10,6 +10,7 @@ pub mod link_access;
 pub mod links;
 pub mod organizations;
 pub mod passkeys;
+pub mod preview_image;
 pub mod reports;
 pub mod tags;
 pub mod websocket;

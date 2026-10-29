@@ -75,6 +75,8 @@ export const API_ENDPOINTS = {
     buildUtm: `${API_BASE_URL}/links/build-utm`,
     sparklines: `${API_BASE_URL}/links/sparklines`,
     previewMetadata: `${API_BASE_URL}/links/preview-metadata`,
+    // A destination's preview image, fetched by the server (GET ?url=).
+    previewImage: `${API_BASE_URL}/links/preview-image`,
     linkStats: (id: number) => `${API_BASE_URL}/links/${id}/stats`,
     linkQr: (id: number, opts?: { color?: string; logo?: boolean; format?: 'png' | 'svg' }) => {
         const base = `${API_BASE_URL}/links/${id}/qr`;

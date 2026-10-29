@@ -95,7 +95,8 @@ export default function LinkRow({
                 )}
                 <div className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-start justify-between gap-4">
                     <div className="space-y-1 min-w-0 flex-1">
-                        {/* Link number and title */}
+                        {/* Link number and title. A title is the link's headline
+                            (bit.ly style); without one the short URL is. */}
                         <div className="flex items-center gap-2 mb-1">
                             <span className="font-mono text-xs font-semibold text-faint">
                                 #{linkNumber}
@@ -104,7 +105,7 @@ export default function LinkRow({
                                 <Pin className="h-3 w-3 text-primary-600 fill-current" aria-label="Pinned" />
                             )}
                             {link.title && (
-                                <span className="text-sm font-medium text-ink truncate">
+                                <span className="font-display text-lg font-bold text-ink truncate">
                                     {link.title}
                                 </span>
                             )}
@@ -116,7 +117,7 @@ export default function LinkRow({
                                 href={mainUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="font-mono text-lg font-bold text-primary-600 hover:underline"
+                                className={`font-mono font-bold text-primary-600 hover:underline ${link.title ? 'text-sm' : 'text-lg'}`}
                             >
                                 {mainUrl.replace(/^https?:\/\//, '')}
                             </a>
