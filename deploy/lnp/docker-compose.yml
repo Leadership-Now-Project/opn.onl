@@ -2,6 +2,7 @@
 #
 #   ldr.now                          -> frontend-public (127.0.0.1:3101), public
 #   links.leadershipnowproject.com   -> frontend-admin  (127.0.0.1:3102), Cloudflare Access
+#   links-mcp.leadershipnowproject.com -> mcp           (127.0.0.1:3104), Cloudflare Access (Managed OAuth)
 #
 # Both frontends proxy their own /api/ to the one backend (see nginx/), so every
 # browser call is same-origin. Images are built by .github/workflows/lnp-images.yml
@@ -146,6 +147,21 @@ services:
       - "127.0.0.1:3103:80"
     volumes:
       - ./nginx/admin.conf:/etc/nginx/site.d/lnp.conf:ro
+    logging: *default-logging
+
+  # Remote MCP server for Claude connectors (links-mcp.leadershipnowproject.com,
+  # Cloudflare Access with Managed OAuth). It trades each request's Access
+  # assertion for a session at the backend's /auth/cf-access, so the Access
+  # application's AUD must also be listed in CF_ACCESS_AUD. See mcp/server.mjs.
+  mcp:
+    image: ghcr.io/leadership-now-project/opn-mcp-remote:${OPN_MCP_TAG:-${OPN_TAG}}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      BACKEND_URL: http://backend:3000
+    ports:
+      - "127.0.0.1:3104:3000"
     logging: *default-logging
 
 volumes:

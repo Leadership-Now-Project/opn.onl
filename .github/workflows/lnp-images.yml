@@ -1,6 +1,6 @@
 name: LNP images
 
-# Builds the three images deploy/lnp/docker-compose.yml runs, for linux/amd64,
+# Builds the four images deploy/lnp/docker-compose.yml runs, for linux/amd64,
 # and pushes them to ghcr.io/leadership-now-project. Run it by pushing a tag
 # `lnp-<upstream version>-<n>` (e.g. lnp-1.9.0-1) once CI has passed on the
 # commit, or by hand from the Actions tab. The tag becomes the image tag
@@ -50,6 +50,9 @@ jobs:
               VITE_FRONTEND_URL=https://ldr.now
               VITE_CF_ACCESS=true
               VITE_THEME=lnp
+          - image: opn-mcp-remote
+            context: deploy/lnp/mcp
+            build_args: ""
     steps:
       - uses: actions/checkout@v4
 
