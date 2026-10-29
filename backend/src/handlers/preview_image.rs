@@ -89,10 +89,7 @@ pub async fn preview_image(
             Ok(c) => {
                 buf.extend_from_slice(&c);
                 if buf.len() > MAX_IMAGE_BYTES {
-                    return json_error(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "Image larger than 2 MiB",
-                    );
+                    return json_error(StatusCode::PAYLOAD_TOO_LARGE, "Image larger than 2 MiB");
                 }
             }
             Err(_) => return json_error(StatusCode::BAD_GATEWAY, "Could not fetch the image"),
