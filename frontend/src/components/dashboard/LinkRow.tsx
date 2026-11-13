@@ -2,7 +2,7 @@ import type { Ref } from 'react';
 import { Link } from 'react-router-dom';
 import {
     Copy, Trash2, BarChart2, QrCode, Lock, Clock, Edit2, Check,
-    Link2, Share2, Pin, CopyPlus, Eye, FileText, FileLock2,
+    Link2, Share2, Pin, CopyPlus, Eye, FileText, FileLock2, CirclePlay,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { shortLinkBase } from '../../config/api';
@@ -11,6 +11,7 @@ import DriveMark from './DriveMark';
 import MiniStats from './MiniStats';
 import { pluralize } from '../../utils/plural';
 import { formatBytes } from '../../utils/fileSize';
+import { providerName } from '../../utils/media';
 import { swatchColor } from './linkScope';
 import { clickCapReached, clickLimitLabel, formatBadgeDay, rowStatus } from './linkStatus';
 import type { LinkData, SparklineSeries } from './types';
@@ -196,6 +197,16 @@ export default function LinkRow({
                                         )}
                                     </button>
                                 </>
+                            )}
+                            {link.media && (
+                                <span
+                                    className={neutralBadge}
+                                    title="Opens a page with the video's player on it, not the video's own site."
+                                    data-media-link={link.id}
+                                >
+                                    <CirclePlay className="h-3 w-3" aria-hidden="true" />
+                                    {providerName(link.media.provider)} video
+                                </span>
                             )}
                             {link.file?.secure_view && (
                                 <span

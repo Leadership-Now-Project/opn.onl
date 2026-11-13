@@ -29,6 +29,18 @@ export interface LinkData {
     file?: LinkFile | null;
     /** The Google Drive file the link was made for. `original_url` is its address in Drive. */
     drive?: LinkDriveFile | null;
+    /** Only on a media link: it opens a page with the video's player instead of redirecting. */
+    media?: LinkMedia | null;
+}
+
+export interface LinkMedia {
+    /** `youtube`, `vimeo` or `drive`. */
+    provider: string;
+    /** The button under the player, when the link has one. */
+    cta_label?: string | null;
+    cta_url?: string | null;
+    /** Only in the answer to creating the link: `not_checked` when the video's host could not be asked. */
+    embed_check?: string | null;
 }
 
 export interface LinkDriveFile {
@@ -73,6 +85,8 @@ export interface LinkUpdatePayload {
     bio_visible?: boolean;
     folder_id?: number;
     remove_folder?: boolean;
+    /** The button under a media link's player. Both empty removes it. */
+    media_cta?: { label: string; url: string };
 }
 
 export interface AppSettings {

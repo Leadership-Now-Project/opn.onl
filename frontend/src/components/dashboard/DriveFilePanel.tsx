@@ -17,10 +17,12 @@ import {
     type DriveFile,
 } from '../../utils/googleDrive';
 import { localIsoDate } from '../../utils/localIsoDate';
+import { ctaFields, ctaProblem, isVideoMime } from '../../utils/media';
 import { safeLocalStorage } from '../../utils/storage';
 import AliasField from './AliasField';
 import { aliasProblem } from './aliasCheck';
 import DriveMark from './DriveMark';
+import MediaCtaFields from './MediaCtaFields';
 import type { AppSettings } from './types';
 
 interface DriveFilePanelProps {
@@ -31,6 +33,12 @@ interface DriveFilePanelProps {
     orgId?: number | null;
     /** Google, as the panel reaches it. Tests pass a stand-in. */
     driveEnv?: DriveEnv;
+    /**
+     * The Media tab's "Google Drive video": only a video can be picked, and
+     * the link opens a page with Google's player on it. Everything else is
+     * this same panel: the sharing is read, shown and changed in one place.
+     */
+    media?: boolean;
 }
 
 const labelClass = 'block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5';
@@ -66,10 +74,16 @@ function linkFailure(sharingChanged: boolean, reason: string): string {
  * clicks Create. Everything our own server would refuse is checked before
  * that change, and a link that still fails after it says the sharing changed.
  */
-export default function DriveFilePanel({ appSettings, onCreated, orgId = null, driveEnv = browserDriveEnv }: DriveFilePanelProps) {
+export default function DriveFilePanel({ appSettings, onCreated, orgId = null, driveEnv = browserDriveEnv, media = false }: DriveFilePanelProps) {
     const drive = appSettings.drive;
     const clientId = appSettings.google_client_id;
     const ready = Boolean(drive?.api_key && drive?.app_id && clientId);
+    // The Files tab and the Media tab are both on the page: each panel's
+    // fields need ids of their own.
+    const idPrefix = media ? 'drive-video' : 'drive';
+    const buttonName = media ? 'Google Drive video' : 'Google Drive Files';
+    const [ctaLabel, setCtaLabel] = useState('');
+    const [ctaUrl, setCtaUrl] = useState('');
 
     const [opening, setOpening] = useState(false);
     // Google's picker has been asked to show; what happens in it is not ours to see.
@@ -101,6 +115,8 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
         setAlias('');
         setTitle('');
         setExpiresAt('');
+        setCtaLabel('');
+        setCtaUrl('');
     };
 
     const choose = async () => {
@@ -119,6 +135,7 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                 token: accessToken,
                 apiKey: drive.api_key,
                 appId: drive.app_id,
+                videosOnly: media,
                 // The picker is Google's from here, and it may never answer
                 // (a frame that did not load says nothing). The button is
                 // given back so the person is never stuck waiting for it.
@@ -143,6 +160,12 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
             const problem = driveLinkProblem(picked);
             if (problem) {
                 setError(`"${picked.name}" was not added. ${problem}`);
+                return;
+            }
+            // The same for a file the media page could not play: our server
+            // takes only a video as a Drive media link.
+            if (media && !isVideoMime(picked.mimeType)) {
+                setError(`"${picked.name}" was not added. Only a video can be shared on a media page.`);
                 return;
             }
             setFile(picked);
@@ -191,6 +214,13 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
         }
         if (Array.from(title.trim()).length > DRIVE_LINK_LIMITS.titleChars) {
             setError(`Title must be at most ${DRIVE_LINK_LIMITS.titleChars} characters`);
+            return;
+        }
+        // A button our server would refuse is caught here, before the file's
+        // sharing can be changed for a link that would then not be made.
+        const badButton = media ? ctaProblem(ctaLabel, ctaUrl) : '';
+        if (badButton) {
+            setError(badButton);
             return;
         }
 
@@ -243,6 +273,9 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                 original_url: current.webViewLink,
                 drive_file: { file_id: current.id, name: current.name, mime_type: current.mimeType },
             };
+            // A media link: the server makes the page's player address from
+            // the file's id itself. None is sent.
+            if (media) body.media = { provider: 'drive', ...ctaFields(ctaLabel, ctaUrl) };
             if (alias) body.custom_alias = alias;
             if (title.trim()) body.title = title.trim();
             if (expiration) body.expires_at = expiration;
@@ -257,7 +290,9 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                 url: `${shortLinkBase()}/${link.code}`,
                 warning: current.sharing.kind === 'anyone'
                     ? ''
-                    : 'The file\'s sharing was not changed. People it is not shared with will be asked to request access when they open this link.',
+                    : media
+                        ? 'The video\'s sharing was not changed. It will not play for people it is not shared with when they open this link.'
+                        : 'The file\'s sharing was not changed. People it is not shared with will be asked to request access when they open this link.',
             });
             reset();
             onCreated();
@@ -286,18 +321,18 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                     : 'cursor-not-allowed bg-paper text-muted opacity-70'}`}
             >
                 <DriveMark />
-                <span className="flex-1">Google Drive Files</span>
+                <span className="flex-1">{buttonName}</span>
                 {!ready && <span className="text-xs font-normal text-faint">Not set up on this server</span>}
                 {opening && <span className="text-xs font-normal text-faint">Opening…</span>}
             </button>
             {pickerShown && (
                 <p className="mt-1.5 text-xs text-faint">
-                    Google's file picker is open. If it did not appear, click Google Drive Files again.
+                    Google's file picker is open. If it did not appear, click {buttonName} again.
                 </p>
             )}
 
             {file && (
-                <form onSubmit={handleCreate} aria-label="Share a Google Drive file" className="mt-3 space-y-4 rounded-lg border border-line2 bg-paper p-4">
+                <form onSubmit={handleCreate} aria-label={media ? 'Share a Google Drive video' : 'Share a Google Drive file'} className="mt-3 space-y-4 rounded-lg border border-line2 bg-paper p-4">
                     <div className="flex items-center gap-2 text-sm">
                         <TypeIcon className="h-4 w-4 shrink-0 text-primary-600" aria-hidden="true" />
                         <span className="min-w-0 flex-1 truncate font-medium text-ink" title={file.name}>{file.name}</span>
@@ -324,9 +359,13 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                     {locked && (
                         <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-ink">
                             <p role="alert">
-                                {file.sharing.kind === 'unknown'
-                                    ? 'People outside may not be able to open this file.'
-                                    : 'People outside will not be able to open this file.'}
+                                {media
+                                    ? (file.sharing.kind === 'unknown'
+                                        ? 'The video may not play for people outside.'
+                                        : 'The video will not play for people outside.')
+                                    : (file.sharing.kind === 'unknown'
+                                        ? 'People outside may not be able to open this file.'
+                                        : 'People outside will not be able to open this file.')}
                             </p>
                             <label className="mt-2 flex items-start gap-2">
                                 <input
@@ -349,7 +388,7 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                     {appSettings.custom_aliases_enabled && (
                         <div>
                             <AliasField
-                                idPrefix="drive"
+                                idPrefix={idPrefix}
                                 alias={alias}
                                 onChange={setAlias}
                                 settings={appSettings}
@@ -359,9 +398,9 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                         </div>
                     )}
                     <div>
-                        <label htmlFor="drive-title" className={labelClass}>Title</label>
+                        <label htmlFor={`${idPrefix}-title`} className={labelClass}>Title</label>
                         <input
-                            id="drive-title"
+                            id={`${idPrefix}-title`}
                             type="text"
                             className={fieldClass}
                             value={title}
@@ -370,19 +409,31 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                             onChange={(e) => setTitle(e.target.value)}
                         />
                     </div>
+                    {media && (
+                        <MediaCtaFields
+                            idPrefix={idPrefix}
+                            label={ctaLabel}
+                            url={ctaUrl}
+                            onLabelChange={setCtaLabel}
+                            onUrlChange={setCtaUrl}
+                            labelClass={labelClass}
+                            fieldClass={fieldClass}
+                            disabled={creating}
+                        />
+                    )}
                     <div>
-                        <label htmlFor="drive-expires" className={labelClass}>Expires (optional)</label>
+                        <label htmlFor={`${idPrefix}-expires`} className={labelClass}>Expires (optional)</label>
                         <input
-                            id="drive-expires"
+                            id={`${idPrefix}-expires`}
                             type="date"
                             className={fieldClass}
                             value={expiresAt}
                             disabled={creating}
-                            aria-describedby="drive-expires-help"
+                            aria-describedby={`${idPrefix}-expires-help`}
                             onChange={(e) => setExpiresAt(e.target.value)}
                             min={localIsoDate()}
                         />
-                        <p id="drive-expires-help" className="mt-1.5 text-xs text-faint">
+                        <p id={`${idPrefix}-expires-help`} className="mt-1.5 text-xs text-faint">
                             Leave empty and the link never expires. The file stays in Google Drive either way.
                         </p>
                     </div>
@@ -403,7 +454,7 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
             {shared && (
                 <div className="mt-3 text-sm">
                     <p role="status" className="text-success">
-                        File shared: <span className="font-mono font-semibold">{shared.url.replace(/^https?:\/\//, '')}</span>
+                        {media ? 'Video shared' : 'File shared'}: <span className="font-mono font-semibold">{shared.url.replace(/^https?:\/\//, '')}</span>
                     </p>
                     {shared.warning && (
                         <p role="alert" className="mt-1 text-ink">{shared.warning}</p>

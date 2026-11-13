@@ -1,5 +1,4 @@
 import { useRef, type KeyboardEvent, type ReactNode } from 'react';
-import CreateMediaTab from './CreateMediaTab';
 
 export type CreateTab = 'links' | 'files' | 'media';
 
@@ -16,6 +15,8 @@ interface CreateCardProps {
     children: ReactNode;
     /** The Files panel: upload a file and share it. */
     files: ReactNode;
+    /** The Media panel: share a video on a page of its own. */
+    media: ReactNode;
 }
 
 /**
@@ -23,7 +24,7 @@ interface CreateCardProps {
  * mounted and the ones not chosen are `hidden`, so what was typed into the
  * link form is still there after a look at another tab.
  */
-export default function CreateCard({ tab, onTabChange, children, files }: CreateCardProps) {
+export default function CreateCard({ tab, onTabChange, children, files, media }: CreateCardProps) {
     const tabRefs = useRef<Partial<Record<CreateTab, HTMLButtonElement | null>>>({});
 
     // Arrow keys move between tabs and choose the one they land on; Tab leaves
@@ -47,7 +48,7 @@ export default function CreateCard({ tab, onTabChange, children, files }: Create
     const panels: Record<CreateTab, ReactNode> = {
         links: children,
         files,
-        media: <CreateMediaTab />,
+        media,
     };
 
     return (

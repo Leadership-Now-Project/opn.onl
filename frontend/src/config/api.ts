@@ -97,6 +97,8 @@ export const API_ENDPOINTS = {
     // token, then fetch the file with that token in a header.
     viewOpen: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/view`,
     viewFile: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/view/file`,
+    // A media link's page: trade the ticket for what the page shows.
+    mediaOpen: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/media`,
     
     // Analytics
     dashboardStats: `${API_BASE_URL}/analytics/dashboard`,

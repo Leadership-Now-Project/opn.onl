@@ -24,6 +24,7 @@ import Skeleton from '../components/dashboard/Skeleton';
 import CreateLinkForm from '../components/dashboard/CreateLinkForm';
 import CreateCard, { type CreateTab } from '../components/dashboard/CreateCard';
 import CreateFilesTab from '../components/dashboard/CreateFilesTab';
+import CreateMediaTab from '../components/dashboard/CreateMediaTab';
 import LinkFilters from '../components/dashboard/LinkFilters';
 import LinkRow from '../components/dashboard/LinkRow';
 import LinkViewToggle from '../components/dashboard/LinkViewToggle';
@@ -1103,6 +1104,14 @@ export default function Dashboard() {
                         <CreateFilesTab
                             appSettings={appSettings}
                             active={createTab === 'files'}
+                            onCreated={() => { fetchLinks(); }}
+                            orgId={orgId}
+                            orgName={activeOrgName}
+                        />
+                    }
+                    media={
+                        <CreateMediaTab
+                            appSettings={appSettings}
                             onCreated={() => { fetchLinks(); }}
                             orgId={orgId}
                             orgName={activeOrgName}

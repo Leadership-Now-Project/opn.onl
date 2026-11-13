@@ -66,7 +66,7 @@ interface BuiltPicker {
 interface PickerApi {
     PickerBuilder: new () => PickerBuilder;
     DocsView: new (viewId?: unknown) => PickerView;
-    ViewId: { DOCS: unknown };
+    ViewId: { DOCS: unknown; DOCS_VIDEOS?: unknown };
     DocsViewMode: { LIST: unknown };
     Action: { PICKED: string; CANCEL: string; ERROR?: string };
     Response: { ACTION: string; DOCUMENTS: string };
@@ -200,9 +200,13 @@ let abandonOpenPicker: (() => void) | null = null;
  * then on the caller can let the person click again. A second call closes
  * the earlier picker, whose promise resolves `null`. A picker that cannot be
  * built, or that reports an error, rejects with words for the person.
+ *
+ * `videosOnly` asks Google for its videos view (the Media tab). That is a
+ * convenience for the person, not a rule: the caller still checks the type of
+ * whatever comes back.
  */
 export async function pickDriveFile(
-    request: { token: string; apiKey: string; appId: string; onShown?: () => void },
+    request: { token: string; apiKey: string; appId: string; videosOnly?: boolean; onShown?: () => void },
     env: DriveEnv = browserDriveEnv,
 ): Promise<string | null> {
     if (!env.google()?.picker) {
@@ -242,7 +246,8 @@ export async function pickDriveFile(
         try {
             // List mode: with the drive.file scope Google shows no thumbnails.
             // Folders are shown to browse into, never to pick.
-            const view = () => new picker.DocsView(picker.ViewId.DOCS)
+            const viewId = request.videosOnly ? picker.ViewId.DOCS_VIDEOS ?? picker.ViewId.DOCS : picker.ViewId.DOCS;
+            const view = () => new picker.DocsView(viewId)
                 .setIncludeFolders(true)
                 .setSelectFolderEnabled(false)
                 .setMode(picker.DocsViewMode.LIST);

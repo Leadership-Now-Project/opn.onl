@@ -43,9 +43,8 @@ describe('Dashboard layout', () => {
     expect(within(panel).getByRole('button', { name: 'Create' })).toBeVisible();
     expect(within(panel).getByRole('button', { name: 'Advanced options' })).toBeVisible();
     // The other panels stay in the document, hidden.
-    for (const placeholder of screen.getAllByText('Coming soon.')) {
-      expect(placeholder).not.toBeVisible();
-    }
+    expect(screen.getByText('File sharing is not set up on this server.')).not.toBeVisible();
+    expect(screen.getByLabelText('YouTube or Vimeo address')).not.toBeVisible();
   });
 
   it('shows the Files tab and hides the form on the Files tab', async () => {
@@ -63,7 +62,7 @@ describe('Dashboard layout', () => {
     expect(screen.queryByRole('button', { name: 'Create' })).not.toBeInTheDocument();
   });
 
-  it('shows the Media placeholder and hides the form on the Media tab', async () => {
+  it('shows the video form and hides the link form on the Media tab', async () => {
     const { user } = await ready();
 
     await user.click(screen.getByRole('tab', { name: 'Media' }));
@@ -71,12 +70,11 @@ describe('Dashboard layout', () => {
     expect(screen.getByRole('tab', { name: 'Media' })).toHaveAttribute('aria-selected', 'true');
     const panel = screen.getByRole('tabpanel');
     expect(panel).toHaveAccessibleName('Media');
-    expect(within(panel).getByText('Coming soon.')).toBeVisible();
-    expect(
-      within(panel).getByText('Share a video or audio clip on an LNP-branded page.'),
-    ).toBeVisible();
+    expect(within(panel).getByLabelText('YouTube or Vimeo address')).toBeVisible();
+    expect(within(panel).getByRole('button', { name: /Google Drive video/ })).toBeVisible();
+    // Nothing can be created until an address is recognised.
+    expect(within(panel).getByRole('button', { name: 'Create' })).toBeDisabled();
     expect(screen.getByPlaceholderText(/example.com/i)).not.toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Create' })).not.toBeInTheDocument();
   });
 
   it('keeps what was typed in the form across a visit to another tab', async () => {

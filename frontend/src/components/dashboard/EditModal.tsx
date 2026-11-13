@@ -5,7 +5,9 @@ import { API_ENDPOINTS, authFetch, failureMessage, responseError } from '../../c
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { localIsoDate } from '../../utils/localIsoDate';
 import { formatBytes } from '../../utils/fileSize';
+import { ctaProblem, providerName } from '../../utils/media';
 import { SECURE_VIEW_NOT_ELIGIBLE } from '../../utils/secureView';
+import MediaCtaFields from './MediaCtaFields';
 import SecureViewSwitch from './SecureViewSwitch';
 import type { LinkData, LinkUpdatePayload, RoutingRule } from './types';
 import { swatchColor, type CatalogItem } from './linkScope';
@@ -64,6 +66,15 @@ export default function EditModal({
     // A file link serves its uploaded file: there is no destination to edit
     // and no routing rules to give it.
     const isFile = Boolean(link.file);
+    // A media link shows one video on a page of its own. A new destination
+    // would end that page, so the address is shown, not edited, and there are
+    // no routing rules to give it either. Its button is edited here.
+    const isMedia = Boolean(link.media);
+    const fixedDestination = isFile || isMedia;
+    const ctaLabelWas = link.media?.cta_label ?? '';
+    const ctaUrlWas = link.media?.cta_url ?? '';
+    const [ctaLabel, setCtaLabel] = useState(ctaLabelWas);
+    const [ctaUrl, setCtaUrl] = useState(ctaUrlWas);
     const secureViewWas = link.file?.secure_view ?? false;
     const [secureView, setSecureView] = useState(secureViewWas);
     // Greyed out for a file the viewer cannot show. A link already switched on
@@ -111,7 +122,7 @@ export default function EditModal({
     useFocusTrap(dialogRef);
 
     useEffect(() => {
-        if (!routingEnabled || isFile) return;
+        if (!routingEnabled || fixedDestination) return;
         let cancelled = false;
         (async () => {
             try {
@@ -132,7 +143,7 @@ export default function EditModal({
             }
         })();
         return () => { cancelled = true; };
-    }, [routingEnabled, isFile, link.id, rulesAttempt]);
+    }, [routingEnabled, fixedDestination, link.id, rulesAttempt]);
 
     const retryRulesLoad = () => {
         setRulesSessionMessage('');
@@ -194,9 +205,18 @@ export default function EditModal({
             return;
         }
 
+        const ctaChanged = isMedia && (ctaLabel.trim() !== ctaLabelWas || ctaUrl.trim() !== ctaUrlWas);
+        if (ctaChanged) {
+            const badButton = ctaProblem(ctaLabel, ctaUrl);
+            if (badButton) {
+                setSaveError(badButton);
+                return;
+            }
+        }
+
         setSaving(true);
         const payload: LinkUpdatePayload = {
-            original_url: !isFile && url !== link.original_url ? url : undefined,
+            original_url: !fixedDestination && url !== link.original_url ? url : undefined,
             password: password || undefined,
             remove_password: removePassword || undefined,
             remove_expiration: shouldRemoveExpiration || undefined,
@@ -204,6 +224,7 @@ export default function EditModal({
             safe_link_interstitial: interstitialEnabled ? safeLinkInterstitial : undefined,
             bio_visible: bioEnabled ? bioVisible : undefined,
         };
+        if (ctaChanged) payload.media_cta = { label: ctaLabel.trim(), url: ctaUrl.trim() };
         if (title !== (link.title ?? '')) payload.title = title;
         if (notes !== (link.notes ?? '')) payload.notes = notes;
         if (nextExpiresIso) payload.expires_at = nextExpiresIso;
@@ -250,7 +271,7 @@ export default function EditModal({
             }
 
             const rules = routingRules.filter(r => r.destination_url.trim());
-            if (routingEnabled && !isFile && rulesLoad === 'loaded' && rulesSignature(rules) !== loadedSignature) {
+            if (routingEnabled && !fixedDestination && rulesLoad === 'loaded' && rulesSignature(rules) !== loadedSignature) {
                 const response = await authFetch(API_ENDPOINTS.linkRules(link.id), {
                     method: 'PUT',
                     body: JSON.stringify({ rules: rulesPayload(rules) }),
@@ -322,7 +343,29 @@ export default function EditModal({
                         </div>
                     )}
 
-                    <div hidden={isFile}>
+                    {link.media && (
+                        <div>
+                            <p className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">Video</p>
+                            <div className="rounded-lg border border-line bg-paper px-4 py-2 text-sm text-ink break-all">
+                                {providerName(link.media.provider)}: <span className="font-mono">{link.original_url}</span>
+                            </div>
+                            <p className="mt-1.5 mb-4 text-xs text-faint">
+                                This link opens a page with the video's player on it. To share a different video, create a new link.
+                            </p>
+                            <MediaCtaFields
+                                idPrefix="edit-media"
+                                label={ctaLabel}
+                                url={ctaUrl}
+                                onLabelChange={setCtaLabel}
+                                onUrlChange={setCtaUrl}
+                                labelClass="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5"
+                                fieldClass="w-full rounded-lg border border-line2 bg-surface px-4 py-2 text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint"
+                                disabled={saving}
+                            />
+                        </div>
+                    )}
+
+                    <div hidden={fixedDestination}>
                         <label htmlFor="edit-url" className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">Destination URL</label>
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
                             <input
@@ -597,7 +640,7 @@ export default function EditModal({
                         </label>
                     )}
 
-                    {routingEnabled && !isFile && (
+                    {routingEnabled && !fixedDestination && (
                         <div className="border-t border-line pt-4">
                             <button
                                 type="button"

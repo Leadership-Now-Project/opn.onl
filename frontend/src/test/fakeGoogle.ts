@@ -128,7 +128,7 @@ export function fakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     const picker = {
         PickerBuilder,
         DocsView,
-        ViewId: { DOCS: 'all' },
+        ViewId: { DOCS: 'all', DOCS_VIDEOS: 'videos' },
         DocsViewMode: { LIST: 'list' },
         Action: { PICKED: 'picked', CANCEL: 'cancel' },
         Response: { ACTION: 'action', DOCUMENTS: 'docs' },
