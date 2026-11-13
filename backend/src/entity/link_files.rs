@@ -32,6 +32,14 @@ pub struct Model {
     pub created_at: DateTime,
     /// When the object was removed from the bucket.
     pub deleted_at: Option<DateTime>,
+    /// Secure View: the link opens the viewer (email first, then the file
+    /// shown with deterrents) instead of redirecting to the file.
+    #[sea_orm(default_value = "false")]
+    pub secure_view: bool,
+    /// Where the copy of a PDF stamped "no printing, no copying" is stored,
+    /// when one was made. Served to the viewer in place of the original, and
+    /// removed from the bucket with it. Never sent to a client.
+    pub protected_key: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -150,6 +150,13 @@ pub struct RateLimiters {
     /// Abuse reports (`POST /report`). Public and unauthenticated, so a small
     /// hourly budget per client, separate from the general API tier.
     pub report: Arc<RateLimiter>,
+    /// Opening a Secure View link (`POST /{code}/view`), per IP and code. Each
+    /// success counts a click and may use up a one-time link, so it does not
+    /// ride the generous redirect budget.
+    pub secure_view: Arc<RateLimiter>,
+    /// The same, shared across every code for one IP, so rotating codes does
+    /// not multiply the budget.
+    pub secure_view_ip: Arc<RateLimiter>,
 }
 
 impl Default for RateLimiters {
@@ -174,6 +181,9 @@ impl Default for RateLimiters {
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10, 3600))),
             // Public abuse reports: 5 per hour per client.
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(5, 3600))),
+            // Secure View: 10 emails a minute for one link, 30 across links.
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10, 60))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(30, 60))),
         }
     }
 }
@@ -198,6 +208,8 @@ impl RateLimiters {
                 limiters.password_verify_ip.cleanup();
                 limiters.contact.cleanup();
                 limiters.report.cleanup();
+                limiters.secure_view.cleanup();
+                limiters.secure_view_ip.cleanup();
                 tracing::debug!("Rate limiter cleanup completed");
             }
         });
@@ -468,6 +480,20 @@ fn route_code(path: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
+/// `POST /{code}/view`: a visitor giving the Secure View viewer an email. Two
+/// segments exactly, the first a short code, so `GET /view` (the code `view`)
+/// and the file request (`GET /{code}/view/file`) are not it.
+fn is_secure_view_open(method: &Method, path: &str) -> bool {
+    if *method != Method::POST || !is_redirect_path(path) {
+        return false;
+    }
+    let mut segments = path.trim_start_matches('/').split('/');
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some(code), Some("view"), None) if !code.is_empty()
+    )
+}
+
 /// Auth API routes are `/auth` and `/auth/...` only. A short code that merely
 /// begins with "auth" (`/auth-sale`) is a redirect, not a login attempt.
 fn is_auth_path(path: &str) -> bool {
@@ -533,6 +559,20 @@ pub async fn rate_limit_middleware(
                 limiters
                     .password_verify
                     .check(&format!("pwverify:{}:{}", ip, route_code(path)))
+            }
+        }
+    } else if is_secure_view_open(req.method(), path) {
+        // Same two budgets as a link password: one per link, and one across
+        // links so that rotating codes buys nothing.
+        match limiters
+            .secure_view_ip
+            .check(&format!("secure-view-ip:{}", ip))
+        {
+            limited @ RateLimitResult::Limited { .. } => limited,
+            RateLimitResult::Allowed { .. } => {
+                limiters
+                    .secure_view
+                    .check(&format!("secure-view:{}:{}", ip, route_code(path)))
             }
         }
     } else if is_auth_path(path) && req.method() == axum::http::Method::POST {
@@ -638,6 +678,18 @@ mod tests {
         assert!(is_redirect_path("/files"));
         assert!(is_redirect_path("/files/preview"));
         assert!(is_redirect_path("/files/verify"));
+        // Opening a Secure View link has its own budget. The file request,
+        // and the short code `view`, stay on the redirect budget.
+        assert!(is_secure_view_open(&Method::POST, "/abc123/view"));
+        assert!(is_secure_view_open(&Method::POST, "/%61bc/view"));
+        assert!(!is_secure_view_open(&Method::GET, "/abc123/view"));
+        assert!(!is_secure_view_open(&Method::POST, "/abc123/view/file"));
+        assert!(!is_secure_view_open(&Method::GET, "/abc123/view/file"));
+        assert!(!is_secure_view_open(&Method::POST, "/view"));
+        assert!(!is_secure_view_open(&Method::POST, "/abc123/verify"));
+        assert!(!is_secure_view_open(&Method::POST, "/links/view"));
+        assert!(is_redirect_path("/abc123/view"));
+        assert!(is_redirect_path("/abc123/view/file"));
         // Root / empty is not a redirect.
         assert!(!is_redirect_path("/"));
     }
@@ -705,6 +757,8 @@ mod tests {
             password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(2, 60))),
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
         });
         let app = Router::new()
             .route("/:code/verify", post(|| async { "ok" }))
@@ -747,6 +801,8 @@ mod tests {
             password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 60))),
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
         });
         let app = Router::new()
             .route("/:code/verify", post(|| async { "ok" }))
@@ -806,6 +862,8 @@ mod tests {
             password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 60))),
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
         })
     }
 
@@ -1082,6 +1140,8 @@ mod tests {
                 password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 60))),
                 contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
                 report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+                secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+                secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             });
 
             let app = Router::new()

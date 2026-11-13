@@ -53,6 +53,8 @@ fn open_limiters() -> Arc<RateLimiters> {
         password_verify_ip: roomy(),
         contact: roomy(),
         report: roomy(),
+        secure_view: roomy(),
+        secure_view_ip: roomy(),
     })
 }
 

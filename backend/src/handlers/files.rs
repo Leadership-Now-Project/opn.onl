@@ -75,6 +75,10 @@ pub struct CompleteUploadRequest {
     pub folder_id: Option<i32>,
     pub org_id: Option<i32>,
     pub tag_ids: Option<Vec<i32>>,
+    /// Secure View: the link opens a viewer that asks for an email address
+    /// and shows the file, instead of handing it over. Only for a PDF, PNG,
+    /// JPEG, GIF or WebP file; refused for anything else. Off when omitted.
+    pub secure_view: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -274,7 +278,7 @@ async fn completed_link(state: &AppState, upload: &link_files::Model) -> Respons
     responses(
         (status = 201, description = "Link created", body = LinkResponse),
         (status = 200, description = "The upload was already completed: its link", body = LinkResponse),
-        (status = 400, description = "The file has not been uploaded, `expires_at` is in the past, or an invalid link field"),
+        (status = 400, description = "The file has not been uploaded, `expires_at` is in the past, `secure_view` for a file type it cannot show, or an invalid link field"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Not the caller's upload (also for an id that does not exist), or a link rule refused it"),
         (status = 404, description = "File sharing is not set up on this instance"),
@@ -371,6 +375,28 @@ pub async fn complete_upload(
         }
     };
 
+    // Secure View is decided before the link exists, so the link is never
+    // live for a moment as an ordinary download. Refused for a type the
+    // viewer cannot show; the upload stays pending, so the same call works
+    // without it.
+    let secure_view = payload.secure_view.unwrap_or(false);
+    if secure_view && !crate::utils::secure_view::eligible(&upload) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            crate::handlers::secure_view::NOT_ELIGIBLE,
+        );
+    }
+    let upload = if upload.secure_view == secure_view {
+        upload
+    } else {
+        let mut chosen: link_files::ActiveModel = upload.into();
+        chosen.secure_view = Set(secure_view);
+        match chosen.update(&state.db).await {
+            Ok(upload) => upload,
+            Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+        }
+    };
+
     let title = payload
         .title
         .filter(|title| !title.trim().is_empty())
@@ -404,6 +430,11 @@ pub async fn complete_upload(
             Ok(None) => upload_forbidden(),
             Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
         };
+    }
+    if secure_view && response.status() == StatusCode::CREATED {
+        // Best effort and in the background: until the protected copy of a
+        // PDF is there (or if it cannot be made) the viewer shows the original.
+        crate::utils::secure_view::spawn_protected_copy(&state, &upload);
     }
     response
 }
@@ -466,16 +497,25 @@ pub async fn get_usage(State(state): State<AppState>, headers: HeaderMap) -> Res
     }
 }
 
-/// The signed address `GET /{code}` sends a visitor of file link `link_id` to.
+/// Where `GET /{code}` sends a visitor of a file link.
+pub(crate) enum FileDestination {
+    /// The signed address of the file, good for a few minutes.
+    Signed(String),
+    /// Secure View: the viewer page. No address of the bucket is made at all.
+    Viewer { file_id: i32 },
+}
+
+/// Where `GET /{code}` sends a visitor of file link `link_id`.
 ///
 /// `Ok(None)` when there is nothing to serve: the file was removed, the upload
 /// was never completed, or file sharing has been switched off. `Err` when the
 /// file could not be looked up or its address could not be signed. Called by
-/// the redirect only after every check a link has.
-pub(crate) async fn signed_destination(
+/// the redirect only after every check a link has. A Secure View file is
+/// never signed: its bytes leave only through `GET /{code}/view/file`.
+pub(crate) async fn file_destination(
     state: &AppState,
     link_id: i32,
-) -> Result<Option<String>, ()> {
+) -> Result<Option<FileDestination>, ()> {
     let Some(files) = &state.files else {
         return Ok(None);
     };
@@ -489,8 +529,11 @@ pub(crate) async fn signed_destination(
     let Some(file) = file else {
         return Ok(None);
     };
+    if file.secure_view {
+        return Ok(Some(FileDestination::Viewer { file_id: file.id }));
+    }
     download_url(files, &file)
         .await
-        .map(Some)
+        .map(|url| Some(FileDestination::Signed(url)))
         .map_err(|error| tracing::error!("Failed to sign a download URL: {error}"))
 }

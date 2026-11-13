@@ -94,6 +94,11 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # Regex for HTML parsing
 regex = "1.10"
 
+# Secure View: writes the copy of a PDF that asks readers not to print or copy
+# it (utils/secure_view.rs). Pure Rust, no system libraries. Default features
+# off: no rayon thread pool and no clock, neither of which that needs.
+lopdf = { version = "0.47", default-features = false }
+
 [dev-dependencies]
 axum-test = { version = "16", features = ["ws"] }
 # Signs the WebAuthn registration and login ceremonies the tests act out; it is

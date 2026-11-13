@@ -3,7 +3,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers::{
     admin, analytics, api_keys, auth, bio, cf_access, contact, default_org, files, folders,
-    google_auth, links, organizations, passkeys, preview_image, reports, tags,
+    google_auth, links, organizations, passkeys, preview_image, reports, secure_view, tags,
 };
 
 /// `info.description` of the served document (Markdown), set in [`api_doc`].
@@ -37,7 +37,8 @@ two headers, and a `RateLimitResponse` body.
 | Budget | Limit | Requests it covers |
 |---|---|---|
 | Burst | 20 per second | Every request except short-link visits (`/{code}`, `/{code}/preview`, \
-`/{code}/verify`, `GET /report`, `HEAD /report`), counted in addition to the request's own budget below |
+`/{code}/verify`, `/{code}/view`, `/{code}/view/file`, `GET /report`, `HEAD /report`), counted in \
+addition to the request's own budget below |
 | Sign-in | 10 per minute | Every `POST` under `/auth/` |
 | Link creation | 100 per hour | `POST /links` and `POST /links/{id}/clone`. `POST /links/bulk` \
 spends one per URL and lists the URLs past the budget in `errors` instead of answering 429 |
@@ -45,7 +46,9 @@ spends one per URL and lists the URLs past the budget in `errors` instead of ans
 | Reports | 5 per hour | `POST /report` |
 | Link password | 5 per minute per link, 20 per minute in total | `POST /{code}/verify`, and \
 `GET /{code}` with an `X-Link-Password` header |
-| Redirects | 100 per second | `GET /{code}`, `GET /{code}/preview`, and `GET` or `HEAD /report` |
+| Secure View | 10 per minute per link, 30 per minute in total | `POST /{code}/view` |
+| Redirects | 100 per second | `GET /{code}`, `GET /{code}/preview`, `GET /{code}/view/file`, and \
+`GET` or `HEAD /report` |
 | General | 100 per minute | Every other request, including `GET`, `PUT`, and `DELETE` under \
 `/auth/` |
 
@@ -174,6 +177,9 @@ pub struct TooManyRequests(pub RateLimitResponse);
         files::start_upload,
         files::complete_upload,
         files::get_usage,
+        secure_view::set_secure_view,
+        secure_view::open_view,
+        secure_view::view_file,
         links::toggle_pin,
         links::check_code_availability,
         links::check_url_health,
@@ -330,6 +336,11 @@ pub struct TooManyRequests(pub RateLimitResponse);
             files::StartUploadResponse,
             files::CompleteUploadRequest,
             files::FileUsageResponse,
+            secure_view::SetSecureViewRequest,
+            secure_view::OpenViewRequest,
+            secure_view::OpenViewResponse,
+            secure_view::ViewFile,
+            secure_view::ViewWatermark,
             links::CreateLinkResponse,
             links::BulkCreateLinkResponse,
             links::BulkCreateFailure,

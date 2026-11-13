@@ -113,7 +113,8 @@ pub struct ScrubStats {
     pub batches: u32,
 }
 
-/// Null `ip_address` and `user_agent` on click events older than `days`.
+/// Null `ip_address`, `user_agent` and `viewer_email` (the address a visitor
+/// gave the Secure View viewer) on click events older than `days`.
 /// Aggregate columns (country, city, region, device, browser, os, referer,
 /// coordinates) are kept so historical analytics stay useful.
 ///
@@ -145,13 +146,14 @@ pub async fn scrub_expired_click_pii_in_batches(
         "WITH batch AS ( \
              SELECT id FROM click_events \
              WHERE created_at < NOW() - make_interval(days => $1) \
-               AND (ip_address IS NOT NULL OR user_agent IS NOT NULL) \
+               AND (ip_address IS NOT NULL OR user_agent IS NOT NULL \
+                    OR viewer_email IS NOT NULL) \
              ORDER BY id \
              LIMIT $2 \
              FOR UPDATE SKIP LOCKED \
          ) \
          UPDATE click_events AS c \
-         SET ip_address = NULL, user_agent = NULL \
+         SET ip_address = NULL, user_agent = NULL, viewer_email = NULL \
          FROM batch \
          WHERE c.id = batch.id",
         vec![days.into()],
@@ -198,7 +200,7 @@ pub async fn scrub_expired_audit_ips_in_batches(
     .await
 }
 
-/// Erase visitor PII (IP, user-agent, referer) from every click event on a
+/// Erase visitor PII (IP, user-agent, referer, Secure View email) from every click event on a
 /// user's personal links. Called after an account deletion commits, so the
 /// request transaction stays the soft-delete itself. Aggregate dimensions
 /// (country, city, device, browser, …) are kept so historical counts still work.
@@ -229,13 +231,13 @@ pub async fn purge_click_pii_for_user_in_batches(
              INNER JOIN links l ON l.id = c.link_id \
              WHERE l.user_id = $1 AND l.org_id IS NULL \
                AND (c.ip_address IS NOT NULL OR c.user_agent IS NOT NULL \
-                    OR c.referer IS NOT NULL) \
+                    OR c.referer IS NOT NULL OR c.viewer_email IS NOT NULL) \
              ORDER BY c.id \
              LIMIT $2 \
              FOR UPDATE OF c SKIP LOCKED \
          ) \
          UPDATE click_events AS c \
-         SET ip_address = NULL, user_agent = NULL, referer = NULL \
+         SET ip_address = NULL, user_agent = NULL, referer = NULL, viewer_email = NULL \
          FROM batch \
          WHERE c.id = batch.id",
         vec![user_id.into()],
@@ -263,13 +265,13 @@ pub async fn scrub_deleted_users_click_pii(
              WHERE l.org_id IS NULL \
                AND u.deleted_at IS NOT NULL \
                AND (c.ip_address IS NOT NULL OR c.user_agent IS NOT NULL \
-                    OR c.referer IS NOT NULL) \
+                    OR c.referer IS NOT NULL OR c.viewer_email IS NOT NULL) \
              ORDER BY c.id \
              LIMIT $1 \
              FOR UPDATE OF c SKIP LOCKED \
          ) \
          UPDATE click_events AS c \
-         SET ip_address = NULL, user_agent = NULL, referer = NULL \
+         SET ip_address = NULL, user_agent = NULL, referer = NULL, viewer_email = NULL \
          FROM batch \
          WHERE c.id = batch.id",
         Vec::new(),

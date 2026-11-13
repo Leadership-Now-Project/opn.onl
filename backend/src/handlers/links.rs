@@ -713,6 +713,8 @@ const RESERVED_ALIASES: &[&str] = &[
     "reset-password",
     "verify-email",
     "r",
+    // The Secure View viewer page (/v/<code>).
+    "v",
 ];
 
 /// Validate alias format and length
@@ -1281,6 +1283,12 @@ pub struct LinkFileInfo {
     pub size_bytes: i64,
     /// The type the uploader's browser gave the file.
     pub content_type: String,
+    /// Secure View is on: the link opens a viewer that asks for an email
+    /// address and shows the file, instead of handing the file over.
+    pub secure_view: bool,
+    /// Whether Secure View can be switched on for this file: only for a type
+    /// a browser shows in place (PDF, PNG, JPEG, GIF, WebP).
+    pub secure_view_eligible: bool,
 }
 
 impl LinkFileInfo {
@@ -1289,6 +1297,8 @@ impl LinkFileInfo {
             filename: file.filename.clone(),
             size_bytes: file.size_bytes,
             content_type: file.content_type.clone(),
+            secure_view: file.secure_view,
+            secure_view_eligible: crate::utils::secure_view::eligible(file),
         }
     }
 }
@@ -2096,6 +2106,35 @@ fn file_redirect(url: &str) -> axum::response::Response {
     use axum::http::{HeaderValue, header};
 
     let Ok(location) = HeaderValue::from_str(url) else {
+        return link_state_unavailable().into_response();
+    };
+    let mut response = StatusCode::FOUND.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, location);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+/// Send a visitor who passed every check of a Secure View link to the viewer
+/// page, with the ticket that proves it. The ticket is in the fragment, which
+/// a browser keeps to itself: it is not sent to this server or any proxy, so
+/// it is in no access log, and `no-referrer` keeps the address from the next
+/// request too. Nothing is counted or used up here; the viewer does that when
+/// it trades the ticket and an email for the file.
+fn viewer_redirect(code: &str, ticket: &str) -> axum::response::Response {
+    use axum::http::{HeaderValue, header};
+
+    let location = format!(
+        "{}/v/{}#t={}",
+        get_base_url(),
+        urlencoding::encode(code),
+        urlencoding::encode(ticket)
+    );
+    let Ok(location) = HeaderValue::from_str(&location) else {
         return link_state_unavailable().into_response();
     };
     let mut response = StatusCode::FOUND.into_response();
@@ -3429,6 +3468,7 @@ pub async fn redirect_link(
                                     db_click_count: fresh_click_count,
                                 },
                                 None,
+                                None,
                                 &headers,
                             );
 
@@ -3656,8 +3696,22 @@ pub async fn redirect_link(
         // a file that is gone, or a bucket that cannot sign, must not use up a
         // click or burn a one-time link.
         let file_destination = if link.is_file() {
-            match crate::handlers::files::signed_destination(&state, link.id).await {
-                Ok(Some(url)) => Some(url),
+            use crate::handlers::files::FileDestination;
+            match crate::handlers::files::file_destination(&state, link.id).await {
+                Ok(Some(FileDestination::Signed(url))) => Some(url),
+                // Secure View: no address is signed and nothing is counted.
+                // The visitor goes to the viewer with a ticket; the click is
+                // taken when the viewer is given an email (`POST /{code}/view`).
+                Ok(Some(FileDestination::Viewer { file_id })) => {
+                    return match crate::utils::secure_view::create_view_ticket(&link, file_id) {
+                        Some(ticket) => viewer_redirect(&code, &ticket),
+                        None => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Unable to open the viewer",
+                        )
+                            .into_response(),
+                    };
+                }
                 Ok(None) => {
                     return dead_link(
                         &headers,
@@ -3719,6 +3773,7 @@ pub async fn redirect_link(
                 link.org_id,
                 accounting,
                 Some(destination.clone()),
+                None,
                 &headers,
             );
             return destination_redirect(&destination);
@@ -3763,6 +3818,7 @@ pub async fn redirect_link(
             link.org_id,
             accounting,
             None,
+            None,
             &headers,
         );
 
@@ -3777,7 +3833,7 @@ pub async fn redirect_link(
 
 /// How a click's aggregate count is accounted, so it is counted exactly once.
 #[derive(Clone, Copy)]
-enum ClickAccounting {
+pub(crate) enum ClickAccounting {
     /// Uncapped link: the click buffer owns the count — the per-link counter is
     /// incremented and added to `links.click_count` at flush.
     Buffered { db_click_count: i64 },
@@ -3798,7 +3854,10 @@ enum ClickAccounting {
 /// burn-after-reading link. Returns `Ok(Some(new_click_count))` when a slot
 /// was consumed, `Ok(None)` when the cap is already exhausted (or the link is
 /// not capped).
-async fn consume_capped_click(db: &DatabaseConnection, link_id: i32) -> Result<Option<i64>, DbErr> {
+pub(crate) async fn consume_capped_click(
+    db: &DatabaseConnection,
+    link_id: i32,
+) -> Result<Option<i64>, DbErr> {
     let stmt = Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"UPDATE links
@@ -3821,9 +3880,11 @@ async fn consume_capped_click(db: &DatabaseConnection, link_id: i32) -> Result<O
 
 /// Helper function to record a click event using the click buffer.
 /// `destination` is the URL a routed click was sent to, `None` for the link's
-/// own URL (see `click_events.destination`).
+/// own URL (see `click_events.destination`). `viewer_email` is the address a
+/// visitor gave the Secure View viewer; it goes into the stored event and
+/// nowhere else: not into the realtime broadcast and not into a log.
 #[allow(clippy::too_many_arguments)]
-fn record_click_buffered(
+pub(crate) fn record_click_buffered(
     click_buffer: &crate::utils::ClickBuffer,
     ws_state: Option<&crate::handlers::websocket::WsState>,
     link_id: i32,
@@ -3832,6 +3893,7 @@ fn record_click_buffered(
     org_id: Option<i32>,
     accounting: ClickAccounting,
     destination: Option<String>,
+    viewer_email: Option<String>,
     headers: &HeaderMap,
 ) {
     use crate::utils::click_buffer::ClickData;
@@ -3878,6 +3940,7 @@ fn record_click_buffered(
         browser: ua_info.browser.clone(),
         os: ua_info.os,
         destination,
+        viewer_email,
         created_at: None,
     };
     match accounting {

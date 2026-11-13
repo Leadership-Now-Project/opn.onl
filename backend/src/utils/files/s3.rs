@@ -4,10 +4,12 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::presigning::PresigningConfig;
+use aws_sdk_s3::primitives::ByteStream;
+use axum::body::Bytes;
 use futures::future::BoxFuture;
 use std::time::Duration;
 
-use super::{FileStore, FilesConfig, PresignedUpload, StoreError};
+use super::{FileStore, FilesConfig, PresignedUpload, StoreError, StoredObject};
 
 pub struct S3FileStore {
     client: S3Client,
@@ -177,6 +179,65 @@ impl FileStore for S3FileStore {
                 .await
                 .map(|_| ())
                 .map_err(|error| store_error("DeleteObject", error))
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<StoredObject>, StoreError>> {
+        Box::pin(async move {
+            let object = match self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+            {
+                Ok(object) => object,
+                Err(error)
+                    if error
+                        .as_service_error()
+                        .is_some_and(|service| service.is_no_such_key()) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(store_error("GetObject", error)),
+            };
+            let size = object
+                .content_length()
+                .and_then(|length| u64::try_from(length).ok());
+            // The body is handed on piece by piece as S3 sends it. Nothing
+            // here holds the whole object.
+            let body = futures::stream::unfold(object.body, |mut body| async move {
+                match body.next().await {
+                    Some(Ok(chunk)) => Some((Ok(chunk), body)),
+                    Some(Err(error)) => Some((Err(store_error("GetObject body", error)), body)),
+                    None => None,
+                }
+            });
+            Ok(Some(StoredObject {
+                size,
+                body: Box::pin(body),
+            }))
+        })
+    }
+
+    fn put<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Bytes,
+        content_type: &'a str,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .content_type(content_type)
+                .body(ByteStream::from(bytes))
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|error| store_error("PutObject", error))
         })
     }
 }

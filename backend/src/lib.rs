@@ -728,9 +728,16 @@ pub fn build_router(app_state: AppState) -> Router {
             post(handlers::files::complete_upload),
         )
         .route("/files/usage", get(handlers::files::get_usage))
+        .route(
+            "/links/:id/secure-view",
+            put(handlers::secure_view::set_secure_view),
+        )
         // Redirect route (must be last to not conflict with other routes)
         .route("/:code/verify", post(handlers::links::verify_link_password))
         .route("/:code/preview", get(handlers::links::preview_link))
+        // Secure View: the viewer page's two calls.
+        .route("/:code/view", post(handlers::secure_view::open_view))
+        .route("/:code/view/file", get(handlers::secure_view::view_file))
         .route("/:code", get(handlers::links::redirect_link))
         // State
         .with_state(app_state)

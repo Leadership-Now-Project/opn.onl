@@ -19,6 +19,7 @@ pub mod privacy;
 pub mod rate_limiter;
 pub mod retired_codes;
 pub mod routing;
+pub mod secure_view;
 pub mod time;
 pub mod unfurler;
 pub mod url_policy;

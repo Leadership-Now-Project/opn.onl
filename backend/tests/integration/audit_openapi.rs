@@ -607,6 +607,10 @@ const PUBLIC_OPERATIONS: &[(&str, &str)] = &[
     ("GET", "/report"),
     ("GET", "/{code}/preview"),
     ("POST", "/{code}/verify"),
+    // Secure View's viewer. No account: the visitor shows the ticket the
+    // short link gave them, then the view token that was traded for it.
+    ("POST", "/{code}/view"),
+    ("GET", "/{code}/view/file"),
 ];
 
 /// Operations that work with or without credentials: `security` must hold the
@@ -693,6 +697,10 @@ async fn protected_operations_declare_bearer_security() {
 const CHECKS_CREDENTIALS_IN_BODY: &[(&str, &str)] = &[
     ("POST", "/auth/login"),
     ("POST", "/auth/passkey/login/finish"),
+    // Secure View: the ticket is in the body, and the view token in the
+    // `X-View-Token` header. Neither is an account credential.
+    ("POST", "/{code}/view"),
+    ("GET", "/{code}/view/file"),
 ];
 
 /// The real router with budgets no sweep can spend, and every optional feature
@@ -733,6 +741,8 @@ async fn spawn_app_without_rate_limits() -> (TestServer, DatabaseConnection) {
         password_verify_ip: roomy(),
         contact: roomy(),
         report: roomy(),
+        secure_view: roomy(),
+        secure_view_ip: roomy(),
     });
     let server =
         TestServer::new(opn_onl_backend::build_router(state)).expect("failed to start test server");
@@ -1084,6 +1094,8 @@ async fn rate_limit_table_matches_the_limiters() {
         ("Reports", &limiters.report, ""),
         ("Link password", &limiters.password_verify, " per link"),
         ("Link password", &limiters.password_verify_ip, " in total"),
+        ("Secure View", &limiters.secure_view, " per link"),
+        ("Secure View", &limiters.secure_view_ip, " in total"),
         ("Redirects", &limiters.redirect, ""),
         ("General", &limiters.general, ""),
     ] {

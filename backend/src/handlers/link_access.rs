@@ -109,6 +109,42 @@ pub async fn authorize_link<C: ConnectionTrait>(
     }
 }
 
+/// Whether `user_id` may see the email addresses visitors gave the Secure
+/// View viewer of `link`: the link's creator, an owner or admin of the link's
+/// organization, and an instance admin. Another member who can read the link
+/// sees its clicks without them.
+///
+/// Call it only for a caller already allowed to read the link. A failed
+/// lookup answers `false`: the addresses are left out, never shown by default.
+pub async fn can_see_viewer_emails<C: ConnectionTrait>(
+    db: &C,
+    user_id: i32,
+    link: &links::Model,
+) -> bool {
+    if link.user_id == Some(user_id) {
+        return true;
+    }
+    if let Some(org_id) = link.org_id {
+        let member = org_members::Entity::find()
+            .filter(org_members::Column::OrgId.eq(org_id))
+            .filter(org_members::Column::UserId.eq(user_id))
+            .one(db)
+            .await
+            .ok()
+            .flatten();
+        if member.is_some_and(|member| member.is_admin()) {
+            return true;
+        }
+    }
+    crate::entity::users::Entity::find_by_id(user_id)
+        .filter(crate::entity::users::Column::DeletedAt.is_null())
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|user| user.is_admin)
+}
+
 /// Load a live link by id and authorize `user_id` for `action` on it. A missing
 /// link and a forbidden one are the same 403, so the answer does not reveal
 /// which ids exist.

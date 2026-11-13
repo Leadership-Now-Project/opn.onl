@@ -25,6 +25,10 @@ pub struct Model {
     /// routing rules. NULL means the link's own `original_url`. Always the
     /// owner's configured URL, never anything from the visitor's request.
     pub destination: Option<String>,
+    /// The email a visitor typed into the Secure View viewer: lower case,
+    /// trimmed, not verified. Shown only to the link's creator and its
+    /// organization's admins, and scrubbed with the IP address.
+    pub viewer_email: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

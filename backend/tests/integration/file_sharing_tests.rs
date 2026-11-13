@@ -122,7 +122,7 @@ impl Bucket {
     ) -> (i64, String) {
         let started = self.start(who, filename, content_type, size).await;
         let key = key_of(&started);
-        self.store.put(&key, size);
+        self.store.put_sized(&key, size);
         (started["upload_id"].as_i64().expect("upload_id"), key)
     }
 
@@ -243,7 +243,7 @@ async fn three_calls_upload_a_file_and_make_a_short_link() {
     assert_eq!(links_of(&bucket.db, alice.id).await, 0, "no link yet");
 
     // 2. The browser sends the file to the bucket.
-    bucket.store.put(&key, 4_096);
+    bucket.store.put_sized(&key, 4_096);
 
     // 3. Complete.
     let alias = format!("report-{}", unique_code());
@@ -262,7 +262,13 @@ async fn three_calls_upload_a_file_and_make_a_short_link() {
     assert_eq!(link["expires_at"], Value::Null, "no expiry by default");
     assert_eq!(
         link["file"],
-        json!({"filename": "Q3 report.pdf", "size_bytes": 4096, "content_type": "application/pdf"})
+        json!({
+            "filename": "Q3 report.pdf",
+            "size_bytes": 4096,
+            "content_type": "application/pdf",
+            "secure_view": false,
+            "secure_view_eligible": true,
+        })
     );
     assert_no_storage_details(&res.text(), &key, "the new link");
 
@@ -367,7 +373,7 @@ async fn an_object_bigger_than_the_limit_is_deleted_when_the_upload_is_completed
         .await;
     let upload_id = started["upload_id"].as_i64().unwrap();
     let key = key_of(&started);
-    bucket.store.put(&key, 5_000);
+    bucket.store.put_sized(&key, 5_000);
 
     let app = bucket.app().await;
     let res = app
@@ -398,7 +404,7 @@ async fn the_size_recorded_is_the_size_that_reached_the_bucket() {
     let alice = person(&bucket.db).await;
     let started = bucket.start(&alice, "a.bin", "", 500).await;
     let key = key_of(&started);
-    bucket.store.put(&key, 700);
+    bucket.store.put_sized(&key, 700);
     let res = bucket
         .app()
         .await
@@ -1054,8 +1060,13 @@ async fn lists_exports_and_stats_show_the_file_and_never_where_it_is() {
     assert_eq!(moved.status_code(), 200, "{}", moved.text());
     assert_eq!(moved.json::<Value>()["file"]["filename"], "Q3 report.pdf");
 
-    let expected =
-        json!({"filename": "Q3 report.pdf", "size_bytes": 4096, "content_type": "application/pdf"});
+    let expected = json!({
+        "filename": "Q3 report.pdf",
+        "size_bytes": 4096,
+        "content_type": "application/pdf",
+        "secure_view": false,
+        "secure_view_eligible": true,
+    });
     for path in [
         "/links".to_string(),
         format!("/folders/{folder_id}/links"),

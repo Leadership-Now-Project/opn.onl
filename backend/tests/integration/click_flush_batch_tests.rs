@@ -158,6 +158,7 @@ fn plain_click(link_id: i32) -> ClickData {
         browser: None,
         os: None,
         destination: None,
+        viewer_email: None,
         created_at: None,
     }
 }
@@ -187,6 +188,9 @@ fn full_click(link_id: i32, i: usize, k: usize) -> ClickData {
         browser: Some(format!("browser-{i}")),
         os: Some(format!("os-{k}")),
         destination: (!i.is_multiple_of(4)).then(|| format!("https://iana.org/dest/{i}")),
+        viewer_email: i
+            .is_multiple_of(3)
+            .then(|| format!("viewer{i}@example.org")),
         created_at: Some(
             base_time()
                 - chrono::Duration::seconds(i as i64)
@@ -210,6 +214,7 @@ fn assert_row_matches(row: &click_events::Model, want: &ClickData) {
     assert_eq!(row.browser, want.browser, "{what}: browser");
     assert_eq!(row.os, want.os, "{what}: os");
     assert_eq!(row.destination, want.destination, "{what}: destination");
+    assert_eq!(row.viewer_email, want.viewer_email, "{what}: viewer_email");
     assert_eq!(Some(row.created_at), want.created_at, "{what}: created_at");
 }
 

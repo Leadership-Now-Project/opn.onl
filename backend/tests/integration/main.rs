@@ -96,6 +96,7 @@ mod retired_codes_tests;
 mod routing_attribution_tests;
 mod routing_rules_tests;
 mod schema_bigint_tests;
+mod secure_view_tests;
 mod security_headers_tests;
 mod sparklines_tests;
 mod tags_association_tests;

@@ -46,6 +46,9 @@ pub struct ClickData {
     /// Where a routed click was sent (`click_events.destination`); `None`
     /// for a link without routing rules.
     pub destination: Option<String>,
+    /// The email a visitor gave the Secure View viewer
+    /// (`click_events.viewer_email`); `None` for every other click.
+    pub viewer_email: Option<String>,
     /// When the click happened. Stamped in `push_event` if unset, so a delayed
     /// flush does not collapse analytics onto the recover instant.
     pub created_at: Option<chrono::NaiveDateTime>,
@@ -706,6 +709,7 @@ fn event_row(event: &ClickData) -> click_events::ActiveModel {
         browser: Set(event.browser),
         os: Set(event.os),
         destination: Set(event.destination),
+        viewer_email: Set(event.viewer_email),
         created_at: Set(event
             .created_at
             .unwrap_or_else(|| chrono::Utc::now().naive_utc())),
@@ -780,6 +784,7 @@ mod tests {
             browser: None,
             os: None,
             destination: None,
+            viewer_email: None,
             created_at: None,
         }
     }

@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::entity::{click_events, links};
-use crate::handlers::link_access::{LinkAction, live_link_for, own_links};
+use crate::handlers::link_access::{LinkAction, can_see_viewer_emails, live_link_for, own_links};
 use crate::handlers::links::get_user_id_from_header;
 use crate::utils::time::utc_rfc3339;
 
@@ -163,6 +163,12 @@ pub struct RecentClick {
     pub browser: Option<String>,
     pub os: Option<String>,
     pub referer: Option<String>,
+    /// The email the visitor gave the Secure View viewer (not verified).
+    /// Present only on a view of a Secure View link, and only when the caller
+    /// is the link's creator, an owner or admin of its organization, or an
+    /// instance admin. Everyone else gets the click without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_email: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -408,7 +414,14 @@ pub async fn get_link_stats(
     // an empty one.
     let clicks_by_destination = destination_breakdown(&events, link.shown_url());
 
-    // Recent clicks (last 100)
+    // Recent clicks (last 100). The email a Secure View visitor gave is for
+    // the link's creator and its organization's admins only; one lookup, and
+    // only when a click on the page carries one.
+    let show_viewer_emails = events
+        .iter()
+        .take(100)
+        .any(|event| event.viewer_email.is_some())
+        && can_see_viewer_emails(&state.db, user_id, &link).await;
     let recent_clicks: Vec<RecentClick> = events
         .iter()
         .take(100)
@@ -421,6 +434,7 @@ pub async fn get_link_stats(
             browser: e.browser.clone(),
             os: e.os.clone(),
             referer: e.referer.clone(),
+            viewer_email: e.viewer_email.clone().filter(|_| show_viewer_emails),
         })
         .collect();
 

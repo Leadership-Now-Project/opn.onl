@@ -15,6 +15,7 @@ pub mod organizations;
 pub mod passkeys;
 pub mod preview_image;
 pub mod reports;
+pub mod secure_view;
 pub mod tags;
 pub mod verified_sign_in;
 pub mod websocket;

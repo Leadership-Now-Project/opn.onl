@@ -3,6 +3,7 @@
 //! The integration tests run the real router on it: there is no bucket to test
 //! against, and what the app must get right is which calls it makes and when.
 
+use axum::body::Bytes;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 
-use super::{FileStore, PresignedUpload, StoreError};
+use super::{FileStore, PresignedUpload, StoreError, StoredObject};
 
 /// A download URL the store signed, as the pieces it was asked to sign.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,11 +42,30 @@ impl HeadGate {
     }
 }
 
+/// What is at a key: real bytes, or only a size for the tests that never
+/// read the object back (it then reads as that many zero bytes).
+#[derive(Clone)]
+enum Stored {
+    Sized(u64),
+    Bytes(Bytes),
+}
+
+impl Stored {
+    fn len(&self) -> u64 {
+        match self {
+            Stored::Sized(size) => *size,
+            Stored::Bytes(bytes) => bytes.len() as u64,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct MemoryFileStore {
-    /// Key to size in bytes.
-    objects: Mutex<HashMap<String, u64>>,
+    objects: Mutex<HashMap<String, Stored>>,
     downloads: Mutex<Vec<SignedDownload>>,
+    /// Every key `get` was asked for, oldest first.
+    reads: Mutex<Vec<String>>,
+    fail_puts: AtomicBool,
     fail_deletes: AtomicBool,
     fail_heads: AtomicBool,
     head_gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
@@ -56,9 +76,44 @@ impl MemoryFileStore {
         Self::default()
     }
 
-    /// What the browser's `PUT` does: an object of `size` bytes at `key`.
-    pub fn put(&self, key: &str, size: u64) {
-        self.objects.lock().unwrap().insert(key.to_string(), size);
+    /// What the browser's `PUT` does, for a test that only needs the object
+    /// to exist: `size` bytes at `key`.
+    pub fn put_sized(&self, key: &str, size: u64) {
+        self.objects
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), Stored::Sized(size));
+    }
+
+    /// What the browser's `PUT` does: these bytes at `key`.
+    pub fn put_bytes(&self, key: &str, bytes: impl Into<Bytes>) {
+        self.objects
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), Stored::Bytes(bytes.into()));
+    }
+
+    /// The bytes at `key`, when it holds real bytes.
+    pub fn bytes(&self, key: &str) -> Option<Bytes> {
+        match self.objects.lock().unwrap().get(key) {
+            Some(Stored::Bytes(bytes)) => Some(bytes.clone()),
+            _ => None,
+        }
+    }
+
+    /// Every key in the bucket.
+    pub fn keys(&self) -> Vec<String> {
+        self.objects.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Every key whose bytes were read through `get`, oldest first.
+    pub fn reads(&self) -> Vec<String> {
+        self.reads.lock().unwrap().clone()
+    }
+
+    /// Make every `put` fail (or work again), as an unreachable bucket would.
+    pub fn fail_puts(&self, fail: bool) {
+        self.fail_puts.store(fail, Ordering::SeqCst);
     }
 
     pub fn contains(&self, key: &str) -> bool {
@@ -145,7 +200,7 @@ impl FileStore for MemoryFileStore {
             if self.fail_heads.load(Ordering::SeqCst) {
                 return Err(StoreError("head refused (test)".to_string()));
             }
-            Ok(self.objects.lock().unwrap().get(key).copied())
+            Ok(self.objects.lock().unwrap().get(key).map(Stored::len))
         })
     }
 
@@ -155,6 +210,45 @@ impl FileStore for MemoryFileStore {
                 return Err(StoreError("delete refused (test)".to_string()));
             }
             self.objects.lock().unwrap().remove(key);
+            Ok(())
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<StoredObject>, StoreError>> {
+        Box::pin(async move {
+            let Some(stored) = self.objects.lock().unwrap().get(key).cloned() else {
+                return Ok(None);
+            };
+            self.reads.lock().unwrap().push(key.to_string());
+            let bytes = match stored {
+                Stored::Bytes(bytes) => bytes,
+                Stored::Sized(size) => Bytes::from(vec![0u8; size as usize]),
+            };
+            // In pieces, as a bucket sends it, so a caller that only handles
+            // one chunk shows up in a test.
+            let size = bytes.len() as u64;
+            let chunks: Vec<Result<Bytes, StoreError>> = bytes
+                .chunks(64 * 1024)
+                .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+                .collect();
+            Ok(Some(StoredObject {
+                size: Some(size),
+                body: Box::pin(futures::stream::iter(chunks)),
+            }))
+        })
+    }
+
+    fn put<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Bytes,
+        _content_type: &'a str,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            if self.fail_puts.load(Ordering::SeqCst) {
+                return Err(StoreError("put refused (test)".to_string()));
+            }
+            self.put_bytes(key, bytes);
             Ok(())
         })
     }

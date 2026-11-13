@@ -46,7 +46,7 @@ async fn stored(
     pending_hours_ago: i64,
 ) -> Stored {
     let key = format!("files/{}", uuid::Uuid::new_v4().simple());
-    store.put(&key, 10);
+    store.put_sized(&key, 10);
     let file = link_files::ActiveModel {
         user_id: Set(Some(user_id)),
         storage_key: Set(key.clone()),

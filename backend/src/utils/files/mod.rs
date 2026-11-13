@@ -16,7 +16,9 @@ mod s3;
 pub use memory::{HeadGate, MemoryFileStore, SignedDownload};
 pub use s3::S3FileStore;
 
+use axum::body::Bytes;
 use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
     JoinType, QueryFilter, QuerySelect, RelationTrait, Statement,
@@ -111,6 +113,10 @@ pub struct FileSharing {
     pub max_bytes: u64,
     pub upload_url_ttl: Duration,
     pub download_url_ttl: Duration,
+    /// Secure View: the largest PDF a protected copy is made of
+    /// (`SECURE_VIEW_PROTECT_MAX_BYTES`). A larger one is shown from the
+    /// original.
+    pub protect_max_bytes: u64,
 }
 
 impl FileSharing {
@@ -123,6 +129,10 @@ impl FileSharing {
             max_bytes: config.max_bytes,
             upload_url_ttl: config.upload_url_ttl,
             download_url_ttl: config.download_url_ttl,
+            protect_max_bytes: crate::utils::env::env_parse(
+                "SECURE_VIEW_PROTECT_MAX_BYTES",
+                crate::utils::secure_view::DEFAULT_PROTECT_MAX_BYTES,
+            ),
         })
     }
 
@@ -134,6 +144,7 @@ impl FileSharing {
             max_bytes: DEFAULT_MAX_BYTES,
             upload_url_ttl: Duration::from_secs(DEFAULT_UPLOAD_URL_TTL_SECS),
             download_url_ttl: Duration::from_secs(DEFAULT_DOWNLOAD_URL_TTL_SECS),
+            protect_max_bytes: crate::utils::secure_view::DEFAULT_PROTECT_MAX_BYTES,
         }
     }
 }
@@ -150,6 +161,13 @@ pub struct StoreError(pub String);
 pub struct PresignedUpload {
     pub url: String,
     pub headers: Vec<(String, String)>,
+}
+
+/// An object being read from the bucket: its size when the bucket said, and
+/// its bytes as they arrive.
+pub struct StoredObject {
+    pub size: Option<u64>,
+    pub body: BoxStream<'static, Result<Bytes, StoreError>>,
 }
 
 /// The bucket, as much of it as the app uses.
@@ -179,6 +197,20 @@ pub trait FileStore: Send + Sync {
 
     /// Remove the object. Removing one that is not there succeeds.
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), StoreError>>;
+
+    /// The object's bytes as a stream, or `None` when there is no such
+    /// object. Only the Secure View viewer reads a file through this process;
+    /// every other visitor is redirected to a signed address.
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<StoredObject>, StoreError>>;
+
+    /// Store `bytes` at `key`. Used for the protected copy of a PDF; uploads
+    /// go straight from the browser to the bucket.
+    fn put<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Bytes,
+        content_type: &'a str,
+    ) -> BoxFuture<'a, Result<(), StoreError>>;
 }
 
 /// A new object key: random, and nothing of the filename in it.
@@ -412,7 +444,7 @@ pub async fn remove_dead_files(
             ""
         };
         let sql = format!(
-            r#"SELECT lf.id, lf.storage_key
+            r#"SELECT lf.id, lf.storage_key, lf.protected_key
                FROM link_files lf
                LEFT JOIN links l ON l.id = lf.link_id
                WHERE lf.deleted_at IS NULL
@@ -446,18 +478,36 @@ pub async fn remove_dead_files(
         for row in rows {
             let id: i32 = row.try_get("", "id")?;
             let key: String = row.try_get("", "storage_key")?;
+            let protected_key: Option<String> = row.try_get("", "protected_key")?;
             after_id = id;
-            match store.delete(&key).await {
+            // The protected copy of a Secure View PDF goes with the original,
+            // and first: the row is marked deleted only when both are gone.
+            let mut removed = Ok(());
+            if let Some(protected_key) = &protected_key {
+                removed = store.delete(protected_key).await;
+            }
+            if removed.is_ok() {
+                removed = store.delete(&key).await;
+            }
+            match removed {
                 Ok(()) => {
-                    link_files::Entity::update_many()
-                        .col_expr(
-                            link_files::Column::DeletedAt,
-                            sea_orm::sea_query::Expr::value(now),
-                        )
-                        .filter(link_files::Column::Id.eq(id))
-                        .exec(db)
+                    // Only if the row still names the copy that was just
+                    // removed. A copy recorded since the row was read is
+                    // still in the bucket; leaving the row as it is makes the
+                    // next sweep remove it.
+                    let marked = db
+                        .execute(Statement::from_sql_and_values(
+                            DbBackend::Postgres,
+                            "UPDATE link_files SET deleted_at = $1 \
+                             WHERE id = $2 AND protected_key IS NOT DISTINCT FROM $3",
+                            [now.into(), id.into(), protected_key.into()],
+                        ))
                         .await?;
-                    report.removed += 1;
+                    if marked.rows_affected() == 1 {
+                        report.removed += 1;
+                    } else {
+                        report.failed += 1;
+                    }
                 }
                 Err(error) => {
                     tracing::error!("Failed to remove a stored file, will retry: {error}");

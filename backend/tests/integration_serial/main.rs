@@ -35,3 +35,4 @@ mod optional_services_tests;
 mod privacy_retention_tests;
 mod public_base_url_tests;
 mod scale_robustness_tests;
+mod secure_view_sweep_tests;
