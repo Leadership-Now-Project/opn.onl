@@ -320,6 +320,17 @@ fn assert_no_storage_details(res: &TestResponse, key: &str, what: &str) {
 /// A token of the same shape the server signs, with a lifetime the test
 /// chooses, so an expired one can be made without waiting.
 fn mint(purpose: &str, link: &links::Model, file_id: i32, email: Option<&str>, ttl: i64) -> String {
+    sign_claims(&claims(purpose, link, file_id, email, ttl))
+}
+
+/// The claims of [`mint`], for a test that needs to change one.
+fn claims(
+    purpose: &str,
+    link: &links::Model,
+    file_id: i32,
+    email: Option<&str>,
+    ttl: i64,
+) -> Value {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
 
@@ -333,14 +344,23 @@ fn mint(purpose: &str, link: &links::Model, file_id: i32, email: Option<&str>, t
         "file_id": file_id,
         "code": link.code,
         "password_fingerprint": fingerprint,
+        // A file's generation is 0 until its switch is turned.
+        "generation": 0,
     });
+    if purpose == "secure_view_ticket" {
+        claims["jti"] = json!(uuid::Uuid::new_v4().simple().to_string());
+    }
     if let Some(email) = email {
         claims["email"] = json!(email);
     }
+    claims
+}
+
+fn sign_claims(claims: &Value) -> String {
     let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET");
     jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-        &claims,
+        claims,
         &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
     )
     .unwrap()
@@ -569,7 +589,16 @@ async fn without_a_valid_ticket_every_refusal_is_the_same() {
 
     let others_ticket = bucket.ticket(&other.code).await;
     let a_view_token = bucket.view_token(&secure.code, email).await;
+    let mut without_an_id = claims("secure_view_ticket", &link, file_id, None, 600);
+    without_an_id.as_object_mut().unwrap().remove("jti");
+    let mut another_generation = claims("secure_view_ticket", &link, file_id, None, 600);
+    another_generation["generation"] = json!(1);
     for (what, ticket) in [
+        ("a ticket without an id", sign_claims(&without_an_id)),
+        (
+            "a ticket from another turn of the switch",
+            sign_claims(&another_generation),
+        ),
         ("no ticket", String::new()),
         ("not a token", "garbage".to_string()),
         ("an unsigned token", "a.b.c".to_string()),
@@ -649,6 +678,8 @@ async fn an_email_that_is_not_one_is_refused_and_not_repeated() {
         "   ",
         "pat-at-example",
         "pat@",
+        "a@b",
+        "pat@[127.0.0.1]",
         "<img src=x onerror=alert(1)>@example.org",
         "pat@example.org\r\nX-Injected: 1",
     ] {
@@ -794,6 +825,199 @@ async fn every_check_of_the_link_is_asked_again_when_the_view_is_opened() {
     .await;
     let res = bucket.file(&secure.code, &token).await;
     assert_eq!(res.status_code(), 410, "{}", res.text());
+    assert_eq!(res.json::<Value>(), json!({"error": "Link has expired"}));
+
+    // Rescheduled to start later: the open call and the file request are
+    // asked the same question, and the link itself agrees with both.
+    let secure = bucket.secure(&bob, json!({})).await;
+    let ticket = bucket.ticket(&secure.code).await;
+    let token = bucket.view_token(&secure.code, email).await;
+    change_link(&bucket.db, secure.id, |link| {
+        link.starts_at = Set(Some(
+            chrono::Utc::now().naive_utc() + chrono::Duration::hours(1),
+        ));
+    })
+    .await;
+    let not_yet = json!({"error": "Link is scheduled to activate later"});
+    assert_eq!(bucket.visit(&secure.code).await.status_code(), 410);
+    let res = bucket.open(&secure.code, &ticket, email).await;
+    assert_eq!(res.status_code(), 410, "{}", res.text());
+    assert_eq!(res.json::<Value>(), not_yet);
+    let res = bucket.file(&secure.code, &token).await;
+    assert_eq!(res.status_code(), 410, "the file too: {}", res.text());
+    assert_eq!(res.json::<Value>(), not_yet);
+    assert_eq!(res.header(CACHE_CONTROL), "no-store");
+}
+
+#[tokio::test]
+async fn switching_secure_view_off_ends_tickets_and_tokens_even_if_it_is_switched_on_again() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let secure = bucket.secure(&alice, json!({})).await;
+    let email = "pat@example.org";
+    let ticket = bucket.ticket(&secure.code).await;
+    let token = bucket.view_token(&secure.code, email).await;
+    assert_eq!(bucket.file(&secure.code, &token).await.status_code(), 200);
+    assert_eq!(
+        file_row(&bucket.db, &secure.key)
+            .await
+            .secure_view_generation,
+        0
+    );
+
+    for (enabled, generation) in [(false, 1), (true, 2)] {
+        let res = bucket
+            .app()
+            .await
+            .put(&format!("/links/{}/secure-view", secure.id))
+            .authorization_bearer(&alice.token)
+            .json(&json!({"enabled": enabled}))
+            .await;
+        assert_eq!(res.status_code(), 200, "{}", res.text());
+        let row = file_row(&bucket.db, &secure.key).await;
+        assert_eq!(row.secure_view, enabled);
+        assert_eq!(row.secure_view_generation, generation, "one turn, one step");
+    }
+    // Asking for what it already is turns nothing.
+    let res = bucket
+        .app()
+        .await
+        .put(&format!("/links/{}/secure-view", secure.id))
+        .authorization_bearer(&alice.token)
+        .json(&json!({"enabled": true}))
+        .await;
+    assert_eq!(res.status_code(), 200, "{}", res.text());
+    assert_eq!(
+        file_row(&bucket.db, &secure.key)
+            .await
+            .secure_view_generation,
+        2
+    );
+
+    // Secure View is on, the link is live, the ticket and the token are
+    // minutes old: neither works, because the switch was turned in between.
+    assert_session_expired(
+        &bucket.open(&secure.code, &ticket, email).await,
+        "a ticket from before the switch was turned",
+    );
+    assert_session_expired(
+        &bucket.file(&secure.code, &token).await,
+        "a token from before the switch was turned",
+    );
+
+    // A visitor who opens the link now is served as usual.
+    let token = bucket.view_token(&secure.code, email).await;
+    assert_eq!(bucket.file(&secure.code, &token).await.status_code(), 200);
+}
+
+#[tokio::test]
+async fn a_ticket_opens_one_view() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let secure = bucket.secure(&alice, json!({})).await;
+    change_link(&bucket.db, secure.id, |link| {
+        link.max_clicks = Set(Some(3));
+    })
+    .await;
+    let ticket = bucket.ticket(&secure.code).await;
+
+    // A mistyped address does not use the ticket up.
+    assert_eq!(
+        bucket
+            .open(&secure.code, &ticket, "not-an-address")
+            .await
+            .status_code(),
+        400
+    );
+    let first = bucket.open(&secure.code, &ticket, "pat@example.org").await;
+    assert_eq!(first.status_code(), 200, "{}", first.text());
+
+    // The same ticket again, whatever the address: refused like any ticket
+    // that is not valid, and the capped link is not run down by it.
+    for n in 0..4 {
+        let again = bucket
+            .open(&secure.code, &ticket, &format!("p{n}@example.org"))
+            .await;
+        assert_session_expired(&again, "a ticket that has opened a view");
+    }
+    assert_eq!(link_row(&bucket.db, secure.id).await.click_count, 1);
+
+    // Another visit is another ticket.
+    let second = bucket.ticket(&secure.code).await;
+    assert_eq!(
+        bucket
+            .open(&secure.code, &second, "sam@example.org")
+            .await
+            .status_code(),
+        200
+    );
+    assert_eq!(link_row(&bucket.db, secure.id).await.click_count, 2);
+}
+
+#[tokio::test]
+async fn one_ticket_sent_many_times_at_once_opens_one_view() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    // No cap: nothing but the ticket itself stops the others.
+    let secure = bucket.secure(&alice, json!({})).await;
+    let ticket = bucket.ticket(&secure.code).await;
+
+    let (app, clicks) = bucket.app_and_clicks().await;
+    let path = format!("/{}/view", secure.code);
+    let attempts = (0..8).map(|n| {
+        app.post(&path)
+            .json(&json!({"ticket": ticket, "email": format!("p{n}@example.org")}))
+            .into_future()
+    });
+    let answers = futures::future::join_all(attempts).await;
+    let count = |status: u16| {
+        answers
+            .iter()
+            .filter(|res| res.status_code() == status)
+            .count()
+    };
+    assert_eq!((count(200), count(401)), (1, 7), "exactly one view");
+    assert_eq!(clicks.pending_count(secure.id), 1, "and one click");
+}
+
+#[tokio::test]
+async fn used_tickets_are_forgotten_once_they_would_have_expired() {
+    use opn_onl_backend::utils::secure_view::forget_expired_tickets;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let db = common::setup_test_db().await;
+    let ticket_row = |id: &str, minutes: i64| {
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO secure_view_tickets (id, expires_at) VALUES ($1, $2)",
+            [
+                id.to_string().into(),
+                (chrono::Utc::now().naive_utc() + chrono::Duration::minutes(minutes)).into(),
+            ],
+        )
+    };
+    let old = format!("old-{}", uuid::Uuid::new_v4().simple());
+    let live = format!("live-{}", uuid::Uuid::new_v4().simple());
+    db.execute(ticket_row(&old, -1)).await.unwrap();
+    db.execute(ticket_row(&live, 10)).await.unwrap();
+
+    assert!(forget_expired_tickets(&db).await.unwrap() >= 1);
+
+    let remaining = |id: String| {
+        let db = db.clone();
+        async move {
+            db.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 AS found FROM secure_view_tickets WHERE id = $1",
+                [id.into()],
+            ))
+            .await
+            .unwrap()
+            .is_some()
+        }
+    };
+    assert!(!remaining(old).await, "expired a minute ago");
+    assert!(remaining(live).await, "still needed for ten minutes");
 }
 
 #[tokio::test]
@@ -879,11 +1103,16 @@ async fn two_emails_at_once_cannot_both_open_a_one_time_link() {
         link.max_clicks = Set(Some(1));
     })
     .await;
-    let ticket = bucket.ticket(&secure.code).await;
+    // Eight visitors, each with a ticket of their own: what lets one of
+    // them in and no more is the link's cap, not the ticket.
+    let mut tickets = Vec::new();
+    for _ in 0..8 {
+        tickets.push(bucket.ticket(&secure.code).await);
+    }
 
     let app = bucket.app().await;
     let path = format!("/{}/view", secure.code);
-    let attempts = (0..8).map(|n| {
+    let attempts = tickets.iter().enumerate().map(|(n, ticket)| {
         app.post(&path)
             .json(&json!({"ticket": ticket, "email": format!("p{n}@example.org")}))
             .into_future()
@@ -1080,6 +1309,37 @@ async fn opening_a_view_has_its_own_small_budget() {
         .await;
     assert_eq!(file.status_code(), 200);
     assert_eq!(file.header("x-ratelimit-limit"), "100");
+}
+
+#[tokio::test]
+async fn rotating_codes_does_not_multiply_the_budget() {
+    // One app, so one set of limiters. Thirty attempts a minute for one
+    // address across every code, of which no single code sees more than
+    // eight, so the per-link budget of ten is never what refuses. The codes
+    // need not exist: the budget is spent before anything is looked up.
+    let bucket = Bucket::new().await;
+    let app = bucket.app().await;
+    let body = json!({"ticket": "x.y.z", "email": "pat@example.org"});
+    let mut answers = Vec::new();
+    for attempt in 0..32 {
+        let code = format!("rotating-code-{}", attempt % 4);
+        answers.push(app.post(&format!("/{code}/view")).json(&body).await);
+        // Stay under the general 20-a-second gate, which is not the subject.
+        tokio::time::sleep(Duration::from_millis(70)).await;
+    }
+    for (attempt, res) in answers.iter().enumerate().take(30) {
+        assert_eq!(res.status_code(), 401, "attempt {}", attempt + 1);
+        assert_eq!(res.header("x-ratelimit-limit"), "10", "the per-link budget");
+    }
+    for res in &answers[30..] {
+        assert_eq!(res.status_code(), 429, "{}", res.text());
+        assert_eq!(
+            res.header("x-ratelimit-limit"),
+            "30",
+            "refused by the budget across codes"
+        );
+        assert!(res.maybe_header("retry-after").is_some());
+    }
 }
 
 // ------------------------------------------------------- switching it on

@@ -20,11 +20,13 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::entity::links::InactiveKind;
 use crate::entity::{link_files, links};
 use crate::handlers::json_error;
 use crate::handlers::link_access::{LinkAction, live_link_for};
@@ -32,12 +34,12 @@ use crate::handlers::links::{
     ClickAccounting, consume_capped_click, get_user_id_from_header, link_response,
     record_click_buffered,
 };
-use crate::utils::files::FileSharing;
+use crate::utils::files::{FileSharing, StoredObject};
 use crate::utils::link_owner::link_owner_is_active;
 use crate::utils::secure_view::{
     VIEW_TOKEN_TTL_SECONDS, clean_viewer_email, create_view_token, eligible, open_for_viewer,
-    remove_protected_copy, spawn_protected_copy, validate_view_ticket, validate_view_token,
-    viewer_kind,
+    remove_protected_copy, spawn_protected_copy, spend_ticket, validate_view_ticket,
+    validate_view_token, viewer_kind,
 };
 use crate::utils::time::utc_rfc3339;
 
@@ -148,6 +150,67 @@ async fn secure_link(
     Ok(file.map(|file| (link, file, files.clone())))
 }
 
+/// Which of the viewer's two calls is asking [`still_viewable`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Asking {
+    /// `POST /{code}/view`: the visit, which is counted.
+    ToOpen,
+    /// `GET /{code}/view/file`: the bytes of a visit already counted.
+    ForTheFile,
+}
+
+/// Every check of a link that the ticket or token in hand cannot vouch for,
+/// because the link may have changed since it was issued. The one place both
+/// viewer calls ask them, so the file request cannot fall behind the open
+/// call. `Ok` is what the viewer draws (`pdf` or `image`) and the type the
+/// bytes are sent as; `Err` is the answer to give (boxed: a response is large).
+///
+/// Only the click cap depends on who asks. To open a view it must have room.
+/// For the file it is not asked again: that visit was counted when the token
+/// was issued, and a one-time link is by then used up by this very viewer.
+async fn still_viewable(
+    state: &AppState,
+    link: &links::Model,
+    file: &link_files::Model,
+    asking: Asking,
+) -> Result<(&'static str, &'static str), Box<Response>> {
+    // What takes a link down for everyone.
+    let now = chrono::Utc::now().naive_utc();
+    if link.starts_at.is_some_and(|starts_at| now < starts_at) {
+        return Err(Box::new(gone(InactiveKind::NotStarted.message())));
+    }
+    if link.expires_at.is_some_and(|expires_at| now > expires_at) {
+        return Err(Box::new(gone(InactiveKind::Expired.message())));
+    }
+    match link_owner_is_active(&state.db, link).await {
+        Ok(true) => {}
+        Ok(false) => return Err(Box::new(gone("This link has been disabled"))),
+        Err(_) => return Err(Box::new(unavailable())),
+    }
+    if asking == Asking::ToOpen {
+        if !link.is_active() {
+            return Err(Box::new(gone(
+                link.inactive_reason().unwrap_or("Link is inactive"),
+            )));
+        }
+        if let Some(max) = link.effective_max_clicks()
+            && link.click_count + state.click_buffer.pending_count(link.id) >= i64::from(max)
+        {
+            return Err(Box::new(gone(used_up(link))));
+        }
+    }
+    viewer_kind(file).ok_or_else(|| Box::new(gone("This file is no longer available")))
+}
+
+/// What a visitor is told when a capped link has no clicks left.
+fn used_up(link: &links::Model) -> &'static str {
+    if link.burn_after_reading {
+        InactiveKind::OneTimeOpened.message()
+    } else {
+        InactiveKind::ClickCapReached.message()
+    }
+}
+
 /// Switch Secure View on or off for a file link
 ///
 /// With it on, opening the short link shows the file in a viewer that first
@@ -210,11 +273,26 @@ pub async fn set_secure_view(
     }
 
     if file.secure_view != payload.enabled {
-        let mut changed: link_files::ActiveModel = file.clone().into();
-        changed.secure_view = Set(payload.enabled);
-        let file = match changed.update(&state.db).await {
-            Ok(file) => file,
-            Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+        // The switch and its generation move in one statement. Every ticket
+        // and view token names the generation it was issued under, so those
+        // handed out before this moment are dead for good: switching off and
+        // on again within their lifetime does not bring them back.
+        let turned = link_files::Entity::update_many()
+            .col_expr(link_files::Column::SecureView, Expr::value(payload.enabled))
+            .col_expr(
+                link_files::Column::SecureViewGeneration,
+                Expr::col(link_files::Column::SecureViewGeneration).add(1),
+            )
+            .filter(link_files::Column::Id.eq(file.id))
+            .filter(link_files::Column::SecureView.ne(payload.enabled))
+            .exec(&state.db)
+            .await;
+        if turned.is_err() {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+        }
+        let file = match link_files::Entity::find_by_id(file.id).one(&state.db).await {
+            Ok(Some(file)) => file,
+            _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
         };
         if payload.enabled {
             spawn_protected_copy(&state, &file);
@@ -237,7 +315,8 @@ pub async fn set_secure_view(
 /// redirected to and the email the visitor typed. Every check of the link
 /// runs again here; then the visit is counted (a one-time or click-capped
 /// link is used up by this call, once per success) and a view token for
-/// `GET /{code}/view/file` is returned.
+/// `GET /{code}/view/file` is returned. A ticket opens one view: once it has,
+/// it is refused like any other ticket that is not valid.
 #[utoipa::path(
     post,
     path = "/{code}/view",
@@ -246,8 +325,8 @@ pub async fn set_secure_view(
     responses(
         (status = 200, description = "The view token and what the viewer shows", body = OpenViewResponse),
         (status = 400, description = "The email is not an email address. The value is not repeated"),
-        (status = 401, description = "No valid ticket: missing, expired, for another link, issued before the link's password changed. Also for a code that does not exist and a link that is not Secure View"),
-        (status = 410, description = "The link stopped being live after the ticket was issued: expired, used up, disabled, or its file is gone"),
+        (status = 401, description = "No valid ticket: missing, expired, already used, for another link, issued before the link's password changed or before Secure View was last switched. Also for a code that does not exist and a link that is not Secure View"),
+        (status = 410, description = "The link stopped being live after the ticket was issued: not started yet, expired, used up, disabled, or its file is gone"),
         (status = 503, description = "The link could not be checked"),
     ),
     tag = "Links"
@@ -263,44 +342,40 @@ pub async fn open_view(
         Ok(None) => return session_expired(),
         Err(()) => return unavailable(),
     };
-    if !validate_view_ticket(&payload.ticket, &link, file.id) {
+    let Some(ticket) = validate_view_ticket(&payload.ticket, &link, &file) else {
         return session_expired();
-    }
+    };
 
     // The ticket says every check passed when it was issued. Up to fifteen
     // minutes later, they are all asked again.
-    if !link.is_active() {
-        return gone(link.inactive_reason().unwrap_or("Link is inactive"));
-    }
-    match link_owner_is_active(&state.db, &link).await {
-        Ok(true) => {}
-        Ok(false) => return gone("This link has been disabled"),
-        Err(_) => return unavailable(),
-    }
-    let used_up = if link.burn_after_reading {
-        "This one-time link has already been opened"
-    } else {
-        "Link has reached maximum clicks"
-    };
-    if let Some(max) = link.effective_max_clicks()
-        && link.click_count + state.click_buffer.pending_count(link.id) >= i64::from(max)
-    {
-        return gone(used_up);
-    }
-    let Some((kind, content_type)) = viewer_kind(&file) else {
-        return gone("This file is no longer available");
+    let (kind, content_type) = match still_viewable(&state, &link, &file, Asking::ToOpen).await {
+        Ok(shown) => shown,
+        Err(refusal) => return *refusal,
     };
 
     let Some(email) = clean_viewer_email(&payload.email) else {
         // Never the value itself: it is whatever a stranger typed.
         return json_error(StatusCode::BAD_REQUEST, "Enter a valid email address");
     };
-    let Some(view_token) = create_view_token(&link, file.id, &email) else {
+    let Some(view_token) = create_view_token(&link, &file, &email) else {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Unable to open the viewer",
         );
     };
+
+    // A ticket opens one view. It is used up here, after everything that can
+    // refuse the visitor without their doing (a mistyped email keeps the
+    // ticket) and before the click is taken, so one ticket cannot run a
+    // capped link down or fill the creator's list with addresses.
+    match spend_ticket(&state.db, &ticket).await {
+        Ok(true) => {}
+        Ok(false) => return session_expired(),
+        Err(error) => {
+            tracing::error!("Failed to record a used view ticket: {error}");
+            return unavailable();
+        }
+    }
 
     // The visit. For a capped link the click is taken with one conditional
     // UPDATE, exactly as `GET /{code}` takes it for an ordinary link, so a
@@ -308,7 +383,7 @@ pub async fn open_view(
     let accounting = if link.effective_max_clicks().is_some() {
         match consume_capped_click(&state.db, link.id).await {
             Ok(Some(new_click_count)) => ClickAccounting::Consumed { new_click_count },
-            Ok(None) => return gone(used_up),
+            Ok(None) => return gone(used_up(&link)),
             Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
         }
     } else {
@@ -386,7 +461,7 @@ fn view_token(headers: &HeaderMap) -> Option<&str> {
     responses(
         (status = 200, description = "The file", body = Vec<u8>, content_type = ["application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp"]),
         (status = 401, description = "No valid view token. Also for a code that does not exist and a link that is not Secure View"),
-        (status = 410, description = "The link expired or was disabled, or its file is gone"),
+        (status = 410, description = "The link has not started yet, expired or was disabled, or its file is gone"),
         (status = 502, description = "File storage is unavailable"),
         (status = 503, description = "The link could not be checked"),
     ),
@@ -405,24 +480,14 @@ pub async fn view_file(
         Ok(None) => return session_expired(),
         Err(()) => return unavailable(),
     };
-    if validate_view_token(token, &link, file.id).is_none() {
+    if validate_view_token(token, &link, &file).is_none() {
         return session_expired();
     }
 
-    // The click cap is not asked again: this visit was counted when the token
-    // was issued, and a one-time link is by now used up by this very viewer.
-    // Everything that takes a link down for everyone still applies.
-    let now = chrono::Utc::now().naive_utc();
-    if link.expires_at.is_some_and(|expires_at| now > expires_at) {
-        return gone("Link has expired");
-    }
-    match link_owner_is_active(&state.db, &link).await {
-        Ok(true) => {}
-        Ok(false) => return gone("This link has been disabled"),
-        Err(_) => return unavailable(),
-    }
-    let Some((_, content_type)) = viewer_kind(&file) else {
-        return gone("This file is no longer available");
+    // The same checks the open call ran, minus the click cap.
+    let content_type = match still_viewable(&state, &link, &file, Asking::ForTheFile).await {
+        Ok((_, content_type)) => content_type,
+        Err(refusal) => return *refusal,
     };
 
     let object = match open_for_viewer(&files, &file).await {
@@ -437,6 +502,14 @@ pub async fn view_file(
         }
     };
 
+    file_response(content_type, object)
+}
+
+/// The bytes, with the headers that keep them where they were sent: shown in
+/// place, never stored, and never read as anything but `content_type`. The
+/// app's security-headers layer also sends `nosniff`; this answer carries its
+/// own so that it does not depend on that layer staying in front of it.
+fn file_response(content_type: &'static str, object: StoredObject) -> Response {
     let mut response = Response::new(Body::from_stream(object.body));
     let out = response.headers_mut();
     out.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -456,4 +529,32 @@ pub async fn view_file(
         out.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Bytes;
+    use futures::StreamExt;
+
+    #[test]
+    fn the_file_is_sent_to_be_shown_in_place_never_stored_and_never_sniffed() {
+        // The handler's own answer, with no middleware in front of it: the
+        // integration tests see `nosniff` from the security-headers layer
+        // whether or not this function sends it.
+        let body = futures::stream::iter([Ok(Bytes::from_static(b"abc"))]).boxed();
+        let response = file_response(
+            "image/png",
+            StoredObject {
+                size: Some(3),
+                body,
+            },
+        );
+        let headers = response.headers();
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+        assert_eq!(headers[header::CONTENT_DISPOSITION], "inline");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store, private");
+        assert_eq!(headers[header::CONTENT_LENGTH], "3");
+    }
 }

@@ -124,6 +124,7 @@ services:
       FILES_UPLOAD_URL_TTL_SECS: ${FILES_UPLOAD_URL_TTL_SECS:-}
       FILES_DOWNLOAD_URL_TTL_SECS: ${FILES_DOWNLOAD_URL_TTL_SECS:-}
       SECURE_VIEW_PROTECT_MAX_BYTES: ${SECURE_VIEW_PROTECT_MAX_BYTES:-}
+      SECURE_VIEW_PROTECT_BUDGET_BYTES: ${SECURE_VIEW_PROTECT_BUDGET_BYTES:-}
       # "Google Drive Files" on the Files tab (README, "Google Drive picker").
       # Both are public values the dashboard hands to Google's file picker.
       # Off while either is blank.

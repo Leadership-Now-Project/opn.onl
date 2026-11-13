@@ -715,6 +715,13 @@ const RESERVED_ALIASES: &[&str] = &[
     "r",
     // The Secure View viewer page (/v/<code>).
     "v",
+    // `POST /{code}/view` is the viewer's call, and nginx proxies every
+    // `/<code>/view` to the backend, like `/<code>/verify` and
+    // `/<code>/preview` above. A link with this code keeps redirecting
+    // (`GET /view` is one segment), and nginx serves `/v/<code>` and
+    // `/r/<code>` before those proxies, so its viewer and interstitial pages
+    // open too; the name is reserved so no new link depends on that order.
+    "view",
 ];
 
 /// Validate alias format and length
@@ -879,6 +886,110 @@ mod reserved_alias_tests {
             .to_string()
     }
 
+    /// The word that follows each `marker`, when one does.
+    fn words_after(source: &str, marker: &str) -> Vec<String> {
+        source
+            .match_indices(marker)
+            .map(|(index, _)| {
+                source[index + marker.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect::<String>()
+            })
+            .filter(|word| !word.is_empty())
+            .collect()
+    }
+
+    /// Each `location ~ <pattern> {` of an nginx file, in order, with the
+    /// lines of its block. `top_level_only` leaves out locations nested in
+    /// another block, which nginx only tries inside that block.
+    fn regex_locations(source: &str, top_level_only: bool) -> Vec<(regex::Regex, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut found = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if top_level_only && trimmed.len() != line.len() {
+                continue;
+            }
+            let (pattern, insensitive) = if let Some(rest) = trimmed.strip_prefix("location ~* ") {
+                (rest, true)
+            } else if let Some(rest) = trimmed.strip_prefix("location ~ ") {
+                (rest, false)
+            } else {
+                continue;
+            };
+            let pattern = pattern
+                .trim_end()
+                .trim_end_matches('{')
+                .trim()
+                .trim_matches('"');
+            let regex = regex::RegexBuilder::new(pattern)
+                .case_insensitive(insensitive)
+                .build()
+                .unwrap_or_else(|error| panic!("nginx pattern {pattern}: {error}"));
+            let block: Vec<&str> = lines[index + 1..]
+                .iter()
+                .take_while(|line| line.trim() != "}")
+                .copied()
+                .collect();
+            found.push((regex, block.join("\n")));
+        }
+        found
+    }
+
+    /// What nginx does with `path` on the public host: the block of the
+    /// first regex location that matches, the deployment's own (included at
+    /// the top of the server block) before the stock ones.
+    fn nginx_block_for(path: &str) -> String {
+        // Prefix locations that stop the regex search (`^~`).
+        assert!(!path.starts_with("/assets/") && !path.starts_with("/api/"));
+        let mut locations =
+            regex_locations(include_str!("../../../deploy/lnp/nginx/public.conf"), true);
+        locations.extend(regex_locations(
+            include_str!("../../../frontend/nginx.conf"),
+            false,
+        ));
+        assert!(locations.len() > 8, "the location parser found too few");
+        locations
+            .into_iter()
+            .find(|(regex, _)| regex.is_match(path))
+            .map(|(_, block)| block)
+            .unwrap_or_else(|| "try_files $uri $uri/ /index.html;".to_string())
+    }
+
+    #[test]
+    fn the_viewer_and_interstitial_pages_reach_the_spa_whatever_the_code_is() {
+        for code in ["abc123", "view", "verify", "preview", "file", "v", "r"] {
+            for page in ["v", "r"] {
+                let block = nginx_block_for(&format!("/{page}/{code}"));
+                assert!(
+                    block.contains("try_files /index.html") && !block.contains("proxy_pass"),
+                    "/{page}/{code} must be served the SPA, not: {block}"
+                );
+            }
+        }
+        // The calls themselves, and the redirect of a link whose code is one
+        // of the words, still reach the backend.
+        for path in [
+            "/abc123",
+            "/view",
+            "/abc123/view",
+            "/view/view",
+            "/abc123/view/file",
+            "/view/view/file",
+            "/abc123/verify",
+            "/abc123/preview",
+        ] {
+            let block = nginx_block_for(path);
+            assert!(
+                block.contains("proxy_pass $backend_url"),
+                "{path} must be proxied to the backend, not: {block}"
+            );
+        }
+        // And `view` cannot be taken as a new alias.
+        assert!(is_reserved("view"), "view must be a reserved alias");
+    }
+
     fn is_reserved(name: &str) -> bool {
         RESERVED_ALIASES
             .iter()
@@ -932,6 +1043,19 @@ mod reserved_alias_tests {
         );
         assert_eq!(swagger, "swagger-ui");
         assert_eq!(api_docs, "api-docs");
+
+        // The word after the code in `/<code>/<word>`, in nginx and in the
+        // router: an alias of that name would make `/v/<alias>` and
+        // `/r/<alias>` look like that call.
+        let mut suffixes = words_after(nginx, "{1,255})/");
+        suffixes.extend(words_after(include_str!("../lib.rs"), "\"/:code/"));
+        for word in ["verify", "preview", "view"] {
+            assert!(
+                suffixes.iter().any(|name| name == word),
+                "the /<code>/<word> parser missed {word}: {suffixes:?}"
+            );
+        }
+        required.extend(suffixes);
 
         required.extend(app);
         required.extend(routes);
@@ -3702,8 +3826,8 @@ pub async fn redirect_link(
                 // Secure View: no address is signed and nothing is counted.
                 // The visitor goes to the viewer with a ticket; the click is
                 // taken when the viewer is given an email (`POST /{code}/view`).
-                Ok(Some(FileDestination::Viewer { file_id })) => {
-                    return match crate::utils::secure_view::create_view_ticket(&link, file_id) {
+                Ok(Some(FileDestination::Viewer { file })) => {
+                    return match crate::utils::secure_view::create_view_ticket(&link, &file) {
                         Some(ticket) => viewer_redirect(&code, &ticket),
                         None => (
                             StatusCode::INTERNAL_SERVER_ERROR,

@@ -40,6 +40,11 @@ pub struct Model {
     /// when one was made. Served to the viewer in place of the original, and
     /// removed from the bucket with it. Never sent to a client.
     pub protected_key: Option<String>,
+    /// Goes up each time Secure View is switched on or off. Tickets and view
+    /// tokens name the generation they were issued under, so those handed out
+    /// before the switch was turned never work again.
+    #[sea_orm(default_value = "0")]
+    pub secure_view_generation: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

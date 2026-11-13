@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { drawWatermark } from './watermark';
 
 interface ImagePageProps {
-    /** The image's bytes. Not kept: they are drawn and let go. */
+    /**
+     * The image's bytes. The page holds them for as long as the viewer is
+     * open (they are this component's input, and a change of watermark draws
+     * them again); nothing here writes them to storage or leaves an address
+     * to them behind.
+     */
     bytes: ArrayBuffer;
     contentType: string;
     /** Drawn into the canvas over the picture. */

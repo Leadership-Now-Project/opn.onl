@@ -502,7 +502,7 @@ pub(crate) enum FileDestination {
     /// The signed address of the file, good for a few minutes.
     Signed(String),
     /// Secure View: the viewer page. No address of the bucket is made at all.
-    Viewer { file_id: i32 },
+    Viewer { file: Box<link_files::Model> },
 }
 
 /// Where `GET /{code}` sends a visitor of file link `link_id`.
@@ -530,7 +530,9 @@ pub(crate) async fn file_destination(
         return Ok(None);
     };
     if file.secure_view {
-        return Ok(Some(FileDestination::Viewer { file_id: file.id }));
+        return Ok(Some(FileDestination::Viewer {
+            file: Box::new(file),
+        }));
     }
     download_url(files, &file)
         .await

@@ -117,6 +117,11 @@ pub struct FileSharing {
     /// (`SECURE_VIEW_PROTECT_MAX_BYTES`). A larger one is shown from the
     /// original.
     pub protect_max_bytes: u64,
+    /// Secure View: the memory budget of the protected-copy step
+    /// (`SECURE_VIEW_PROTECT_BUDGET_BYTES`, see
+    /// `secure_view::ProtectLimits::budget_bytes`). A PDF that needs more is
+    /// shown from the original.
+    pub protect_budget_bytes: u64,
 }
 
 impl FileSharing {
@@ -133,6 +138,10 @@ impl FileSharing {
                 "SECURE_VIEW_PROTECT_MAX_BYTES",
                 crate::utils::secure_view::DEFAULT_PROTECT_MAX_BYTES,
             ),
+            protect_budget_bytes: crate::utils::env::env_parse(
+                "SECURE_VIEW_PROTECT_BUDGET_BYTES",
+                crate::utils::secure_view::DEFAULT_PROTECT_BUDGET_BYTES,
+            ),
         })
     }
 
@@ -145,6 +154,7 @@ impl FileSharing {
             upload_url_ttl: Duration::from_secs(DEFAULT_UPLOAD_URL_TTL_SECS),
             download_url_ttl: Duration::from_secs(DEFAULT_DOWNLOAD_URL_TTL_SECS),
             protect_max_bytes: crate::utils::secure_view::DEFAULT_PROTECT_MAX_BYTES,
+            protect_budget_bytes: crate::utils::secure_view::DEFAULT_PROTECT_BUDGET_BYTES,
         }
     }
 }
@@ -624,6 +634,11 @@ pub fn spawn_cleanup_task(db: DatabaseConnection, store: Arc<dyn FileStore>) {
                     report.failed
                 ),
                 Err(error) => tracing::error!("File sweep failed: {error}"),
+            }
+            // Secure View: the ids of tickets that opened a view are only
+            // needed until the ticket would have expired.
+            if let Err(error) = crate::utils::secure_view::forget_expired_tickets(&db).await {
+                tracing::error!("Could not forget used Secure View tickets: {error}");
             }
         }
     });

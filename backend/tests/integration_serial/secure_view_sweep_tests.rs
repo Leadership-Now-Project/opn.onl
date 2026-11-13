@@ -9,11 +9,13 @@ use crate::common;
 
 use chrono::{Duration, Utc};
 use common::{setup_test_db, unique_email};
-use opn_onl_backend::entity::{click_events, link_files, links, users};
+use opn_onl_backend::entity::{click_events, link_files, links, organizations, users};
 use opn_onl_backend::utils::files::{
     FileStore, MemoryFileStore, Sweep, SweepReport, remove_dead_files,
 };
-use opn_onl_backend::utils::privacy::{purge_click_pii_for_user, scrub_expired_click_pii};
+use opn_onl_backend::utils::privacy::{
+    purge_click_pii_for_user, scrub_deleted_users_click_pii, scrub_expired_click_pii,
+};
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 
 async fn owner(db: &DatabaseConnection) -> i32 {
@@ -389,5 +391,82 @@ async fn deleting_an_account_erases_the_viewer_emails_on_its_links() {
         click_row(&db, others.id).await.viewer_email.as_deref(),
         Some("other-reader@example.org"),
         "another account's links are untouched"
+    );
+}
+
+#[tokio::test]
+async fn the_daily_scrub_erases_viewer_emails_on_a_deleted_accounts_own_links() {
+    // What the daily task runs for accounts whose deletion did not get as far
+    // as its own scrub. Personal links only, like the IP and the user agent:
+    // an organization's link is the organization's, and keeps its clicks'
+    // emails until the retention window.
+    let _serial = common::serial_guard().await;
+    let db = setup_test_db().await;
+    let gone = owner(&db).await;
+    let staying = owner(&db).await;
+    let mut deleted: users::ActiveModel = users::Entity::find_by_id(gone)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into();
+    deleted.deleted_at = Set(Some(Utc::now().naive_utc()));
+    deleted.update(&db).await.unwrap();
+
+    // Only an email on the row, no IP, user agent or referer: the scrub must
+    // find it by the email alone.
+    let theirs = click(
+        &db,
+        personal_link(&db, gone).await,
+        1,
+        Some("reader@example.org"),
+    )
+    .await;
+    let others = click(
+        &db,
+        personal_link(&db, staying).await,
+        1,
+        Some("other-reader@example.org"),
+    )
+    .await;
+    let org = organizations::ActiveModel {
+        name: Set("Team".to_string()),
+        slug: Set(format!("sv-{}", uuid::Uuid::new_v4().simple())),
+        owner_id: Set(staying),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("insert organization");
+    let org_link = links::ActiveModel {
+        code: Set(format!(
+            "sv{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )),
+        original_url: Set("https://iana.org/".to_string()),
+        user_id: Set(Some(gone)),
+        org_id: Set(Some(org.id)),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("insert organization link")
+    .id;
+    let the_teams = click(&db, org_link, 1, Some("team-reader@example.org")).await;
+
+    scrub_deleted_users_click_pii(&db, 1000).await.unwrap();
+
+    let theirs = click_row(&db, theirs.id).await;
+    assert_eq!(theirs.viewer_email, None, "the deleted account's own link");
+    assert_eq!(theirs.country.as_deref(), Some("US"), "aggregates are kept");
+    assert_eq!(
+        click_row(&db, others.id).await.viewer_email.as_deref(),
+        Some("other-reader@example.org"),
+        "a live account's links are untouched"
+    );
+    assert_eq!(
+        click_row(&db, the_teams.id).await.viewer_email.as_deref(),
+        Some("team-reader@example.org"),
+        "an organization's link is not the departing member's"
     );
 }
