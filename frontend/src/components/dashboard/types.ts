@@ -21,6 +21,10 @@ export interface LinkData {
     folder_id?: number | null;
     org_id?: number | null;
     tags: { id: number; name: string; color?: string | null }[];
+    /** Who created the link. Only in an organization's list (GET /links?org_id=). */
+    created_by?: { name: string | null; email: string } | null;
+    /** False when the API would refuse this caller's delete. Only in an organization's list. */
+    can_delete?: boolean;
 }
 
 export interface RoutingRule {
@@ -61,6 +65,8 @@ export interface AppSettings {
     safe_link_interstitial_enabled: boolean;
     conditional_routing_enabled: boolean;
     link_in_bio_enabled: boolean;
+    /** The shared organization every staff account joins, when the instance has one. */
+    default_org?: { id: number; name: string } | null;
 }
 
 export type LinkSortBy = 'date' | 'clicks';

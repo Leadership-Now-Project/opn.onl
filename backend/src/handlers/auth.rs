@@ -3,6 +3,8 @@ use chrono::{Duration, Utc};
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+use crate::handlers::default_org::DefaultOrgInfo;
 use validator::Validate;
 
 use crate::AppState;
@@ -1714,6 +1716,11 @@ pub struct AppSettingsResponse {
     /// then offers Google instead of the password form.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub google_client_id: Option<String>,
+    /// The shared organization every staff account joins at sign-in
+    /// (`DEFAULT_ORG_*`, `handlers/default_org.rs`). Present only when it is
+    /// configured and exists; the dashboard then lists its links.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_org: Option<DefaultOrgInfo>,
 }
 
 /// Get app settings
@@ -1801,6 +1808,7 @@ pub async fn get_app_settings(State(state): State<AppState>) -> impl IntoRespons
             email_configured,
             link_expiry_reminders_enabled,
             google_client_id: crate::handlers::google_auth::configured_client_id(),
+            default_org: crate::handlers::default_org::settings_info(&state.db).await,
         }),
     )
 }

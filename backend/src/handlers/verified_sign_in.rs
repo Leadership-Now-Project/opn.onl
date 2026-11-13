@@ -9,6 +9,9 @@
 //! and get a random password nobody knows. The first live account becomes
 //! admin, as in `/auth/register`, under the same advisory lock. A soft-deleted
 //! account is never revived: `live_users_by_email` does not see it.
+//!
+//! When a default organization is configured (`default_org.rs`), the account
+//! joins it here, on every sign-in, and its personal links move into it.
 
 use axum::{
     Json,
@@ -42,6 +45,15 @@ pub async fn sign_in_verified_email(
     };
     if user.is_disabled() {
         return json_error(StatusCode::FORBIDDEN, "This account is disabled");
+    }
+    // A failure here does not refuse the sign-in: the person can still reach
+    // their own links, and the next sign-in tries again.
+    if let Err(error) = crate::handlers::default_org::join_at_sign_in(state, &user).await {
+        tracing::error!(
+            user_id = user.id,
+            "Failed to join the default organization: {}",
+            error
+        );
     }
 
     match create_jwt(user.id, &user.email, user.token_version) {

@@ -159,7 +159,7 @@ fn db_error() -> (StatusCode, Json<serde_json::Value>) {
 pub async fn create_tag(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<CreateTagRequest>,
+    Json(mut payload): Json<CreateTagRequest>,
 ) -> Result<(StatusCode, Json<TagResponse>), (StatusCode, Json<serde_json::Value>)> {
     let user_id = get_user_id_from_header(&state.db, &headers)
         .await
@@ -169,6 +169,12 @@ pub async fn create_tag(
                 Json(serde_json::json!({"error": "Unauthorized"})),
             )
         })?;
+
+    // A member of the default organization keeps their tags there, where
+    // their links are.
+    if payload.org_id.is_none() {
+        payload.org_id = crate::handlers::default_org::home_org(&state.db, user_id).await;
+    }
 
     // Org tags can only be created by members with edit rights (not viewers).
     if let Some(org_id) = payload.org_id
@@ -253,7 +259,13 @@ pub async fn get_tags(
 
     let mut tag_query = tags::Entity::find();
 
-    if let Some(org_id) = query.org_id {
+    // With no organization named, a member of the default organization lists
+    // its tags: that is where theirs are.
+    let org_id = match query.org_id {
+        Some(org_id) => Some(org_id),
+        None => crate::handlers::default_org::home_org(&state.db, user_id).await,
+    };
+    if let Some(org_id) = org_id {
         // Verify user is member of this org before listing its tags
         use crate::entity::org_members;
         let is_member = org_members::Entity::find()
@@ -869,6 +881,8 @@ pub async fn get_links_by_tag(
             is_active: l.is_active(),
             is_pinned: l.is_pinned,
             tags: tags_by_link.remove(&l.id).unwrap_or_default(),
+            created_by: None,
+            can_delete: None,
         })
         .collect();
 

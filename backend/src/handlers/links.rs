@@ -22,7 +22,8 @@ use validator::Validate;
 use crate::AppState;
 use crate::entity::{blocked_domains, blocked_links, click_events, link_tags, links, tags, users};
 use crate::handlers::link_access::{
-    CallerAccess, LinkAction, count_own_live_links, listed_links, live_link_for, readable_links,
+    CallerAccess, LinkAction, count_own_live_links, created_by, listed_links, live_link_for,
+    readable_links,
 };
 use crate::handlers::websocket::ClickEvent;
 use crate::handlers::{json_error, verification_satisfied};
@@ -1127,6 +1128,9 @@ pub struct LinksQuery {
     /// List every link of this organization instead of the caller's own.
     /// Any current member may; others get an empty list.
     pub org_id: Option<i32>,
+    /// With `org_id`, keep only the links the caller created ("My Links").
+    /// Without `org_id` the list is already the caller's own.
+    pub mine: Option<bool>,
     pub tag_id: Option<i32>,
     pub search: Option<String>,
     /// Page size. Omitted or 0 defaults to 1000. Maximum 1000.
@@ -1195,6 +1199,15 @@ pub struct TagInfo {
     pub color: Option<String>,
 }
 
+/// Who created a link, as an organization's link list shows it. Nothing else
+/// about the account is included.
+#[derive(Serialize, ToSchema, Clone)]
+pub struct LinkCreator {
+    /// The account's display name, when it has set one.
+    pub name: Option<String>,
+    pub email: String,
+}
+
 #[derive(Serialize, ToSchema, Clone)]
 pub struct LinkResponse {
     pub id: i32,
@@ -1221,6 +1234,14 @@ pub struct LinkResponse {
     pub is_active: bool,
     pub is_pinned: bool,
     pub tags: Vec<TagInfo>,
+    /// Who created the link. Only in `GET /links` with `org_id`, and absent
+    /// for a link whose creator's account is gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<LinkCreator>,
+    /// Whether the caller may delete the link. Only in `GET /links` with
+    /// `org_id`: an editor may change a colleague's link but not delete it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_delete: Option<bool>,
 }
 
 impl LinkResponse {
@@ -1254,6 +1275,8 @@ impl LinkResponse {
             is_active: l.is_active(),
             is_pinned: l.is_pinned,
             tags,
+            created_by: None,
+            can_delete: None,
         }
     }
 }
@@ -2103,7 +2126,7 @@ pub fn anonymous_links_allowed() -> bool {
 pub async fn create_link(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<CreateLinkRequest>,
+    Json(mut payload): Json<CreateLinkRequest>,
 ) -> impl IntoResponse {
     // Resolve the caller first, so rejected credentials are refused before any
     // validation or DNS lookup is spent on the request.
@@ -2116,6 +2139,13 @@ pub async fn create_link(
             StatusCode::UNAUTHORIZED,
             "Sign in or send an API key to create a link.",
         );
+    }
+    // A member of the default organization creates their links there, from
+    // the dashboard, an API key or the connector alike.
+    if payload.org_id.is_none()
+        && let Some(uid) = user_id
+    {
+        payload.org_id = crate::handlers::default_org::home_org(&state.db, uid).await;
     }
 
     // Validate URL first
@@ -2523,6 +2553,8 @@ pub async fn create_link(
             is_active,
             is_pinned: false,
             tags,
+            created_by: None,
+            can_delete: None,
         }),
     )
         .into_response()
@@ -4565,6 +4597,40 @@ fn tag_name_matches(user_id: i32, pattern: &str) -> sea_orm::sea_query::SimpleEx
     )
 }
 
+/// The creators of `rows` (live accounts only) and the caller's access, for an
+/// organization's link list. Two queries for the page, not one per link.
+async fn org_list_details(
+    db: &DatabaseConnection,
+    user_id: i32,
+    rows: &[links::Model],
+) -> Result<(HashMap<i32, LinkCreator>, CallerAccess), DbErr> {
+    let mut creator_ids: Vec<i32> = rows.iter().filter_map(|l| l.user_id).collect();
+    creator_ids.sort_unstable();
+    creator_ids.dedup();
+    let creators = if creator_ids.is_empty() {
+        HashMap::new()
+    } else {
+        users::Entity::find()
+            .filter(users::Column::Id.is_in(creator_ids))
+            .filter(users::Column::DeletedAt.is_null())
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|u| {
+                let name = u.display_name.filter(|name| !name.trim().is_empty());
+                (
+                    u.id,
+                    LinkCreator {
+                        name,
+                        email: u.email,
+                    },
+                )
+            })
+            .collect()
+    };
+    Ok((creators, CallerAccess::load(db, user_id).await?))
+}
+
 /// Get user's links with filtering
 #[utoipa::path(
     get,
@@ -4573,7 +4639,7 @@ fn tag_name_matches(user_id: i32, pattern: &str) -> sea_orm::sea_query::SimpleEx
     responses(
         (
             status = 200,
-            description = "The caller's non-deleted links, or every non-deleted link of the organization given by `org_id` when the caller is a member. Pinned links first, then newest first (limit defaults to 1000, maximum 1000). `search` is a case-insensitive substring match on URL, code, title, notes and the name of a tag in the link's scope. `bio_visible` keeps only links that are or are not on a bio page",
+            description = "The caller's non-deleted links, or every non-deleted link of the organization given by `org_id` when the caller is a member (only those the caller created with `mine=true`; each item then carries `created_by` and `can_delete`). Pinned links first, then newest first (limit defaults to 1000, maximum 1000). `search` is a case-insensitive substring match on URL, code, title, notes and the name of a tag in the link's scope. `bio_visible` keeps only links that are or are not on a bio page",
             body = Vec<LinkResponse>,
             headers(("X-Total-Count" = u64, description = "How many links match the filters, ignoring `limit` and `offset`"))
         ),
@@ -4604,6 +4670,10 @@ pub async fn get_user_links(
     let mut link_query = links::Entity::find()
         .filter(listed_links(user_id, query.org_id))
         .filter(links::Column::DeletedAt.is_null());
+
+    if query.mine == Some(true) {
+        link_query = link_query.filter(created_by(user_id));
+    }
 
     // Filter by folder
     if let Some(folder_id) = query.folder_id {
@@ -4673,13 +4743,32 @@ pub async fn get_user_links(
         }
     };
 
+    // An organization's list is other people's links too: say who made each
+    // one, and whether this caller may delete it.
+    let org_view = if query.org_id.is_some() {
+        match org_list_details(&state.db, user_id, &user_links).await {
+            Ok(details) => Some(details),
+            Err(error) => {
+                tracing::error!("Failed to load creators for the link list: {}", error);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+            }
+        }
+    } else {
+        None
+    };
+
     let base_url = get_base_url();
     let api_url = get_api_url();
     let response: Vec<LinkResponse> = user_links
         .iter()
         .map(|l| {
             let tags = tags_by_link.remove(&l.id).unwrap_or_default();
-            LinkResponse::from_model(l, tags, &base_url, &api_url)
+            let mut item = LinkResponse::from_model(l, tags, &base_url, &api_url);
+            if let Some((creators, access)) = &org_view {
+                item.created_by = l.user_id.and_then(|id| creators.get(&id).cloned());
+                item.can_delete = Some(access.can(l, LinkAction::Delete));
+            }
+            item
         })
         .collect();
 
@@ -5429,6 +5518,8 @@ pub async fn update_link(
                     is_active: updated.is_active(),
                     is_pinned: updated.is_pinned,
                     tags,
+                    created_by: None,
+                    can_delete: None,
                 }),
             )
                 .into_response()
@@ -5466,7 +5557,7 @@ pub async fn update_link(
 pub async fn bulk_create_links(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<BulkCreateLinkRequest>,
+    Json(mut payload): Json<BulkCreateLinkRequest>,
 ) -> impl IntoResponse {
     let user_id = get_user_id_from_header(&state.db, &headers).await;
 
@@ -5483,6 +5574,13 @@ pub async fn bulk_create_links(
             }),
         )
             .into_response();
+    }
+
+    // As in `create_link`: a member of the default organization imports there.
+    if payload.org_id.is_none()
+        && let Some(uid) = user_id
+    {
+        payload.org_id = crate::handlers::default_org::home_org(&state.db, uid).await;
     }
 
     // Cap batch size to avoid unbounded per-item work / DoS.
@@ -5987,6 +6085,8 @@ pub struct ExportLinksQuery {
     /// Export every link of this organization instead of the caller's own.
     /// Any current member may; others get a header-only file.
     pub org_id: Option<i32>,
+    /// With `org_id`, export only the links the caller created.
+    pub mine: Option<bool>,
 }
 
 /// Written first so Excel reads the file as UTF-8 instead of the system code
@@ -6032,7 +6132,8 @@ pub async fn export_links_csv(
     // An export is what a user keeps as a backup, so a failed read must not
     // come back as a file that holds only the header row: the first page is
     // read before the response starts, and a failure there is a plain 500.
-    let first = match export_page(&state.db, user_id, query.org_id, None).await {
+    let mine = query.mine == Some(true);
+    let first = match export_page(&state.db, user_id, query.org_id, mine, None).await {
         Ok(rows) => rows,
         Err(error) => {
             tracing::error!("Failed to export links: {}", error);
@@ -6057,12 +6158,21 @@ pub async fn export_links_csv(
             db: state.db.clone(),
             user_id,
             org_id: query.org_id,
+            mine,
             base_url,
             cursor,
         },
         |mut stream| async move {
             let after = stream.cursor?;
-            match export_page(&stream.db, stream.user_id, stream.org_id, Some(after)).await {
+            match export_page(
+                &stream.db,
+                stream.user_id,
+                stream.org_id,
+                stream.mine,
+                Some(after),
+            )
+            .await
+            {
                 Ok(rows) if rows.is_empty() => None,
                 Ok(rows) => {
                     stream.cursor = export_cursor(&rows);
@@ -6104,6 +6214,7 @@ struct ExportStream {
     db: DatabaseConnection,
     user_id: i32,
     org_id: Option<i32>,
+    mine: bool,
     base_url: String,
     /// Where the next page starts; `None` once the last page was short.
     cursor: Option<(chrono::NaiveDateTime, i32)>,
@@ -6116,11 +6227,15 @@ async fn export_page(
     db: &DatabaseConnection,
     user_id: i32,
     org_id: Option<i32>,
+    mine: bool,
     after: Option<(chrono::NaiveDateTime, i32)>,
 ) -> Result<Vec<links::Model>, DbErr> {
     let mut page = links::Entity::find()
         .filter(listed_links(user_id, org_id))
         .filter(links::Column::DeletedAt.is_null());
+    if mine {
+        page = page.filter(created_by(user_id));
+    }
     if let Some((created_at, id)) = after {
         page = page.filter(
             Condition::any()

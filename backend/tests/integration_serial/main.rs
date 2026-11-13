@@ -19,6 +19,7 @@ mod analytics_retention_settings_tests;
 mod audit_email_masking_tests;
 mod backup_tests;
 mod cors_tests;
+mod default_org_tests;
 mod deleted_link_purge_task_tests;
 mod deleted_link_purge_tests;
 mod env_switch_tests;

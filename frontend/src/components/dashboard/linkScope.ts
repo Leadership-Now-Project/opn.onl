@@ -4,6 +4,8 @@ export interface LinkListScope {
     orgId: number | null;
     folderId: number | null;
     tagId: number | null;
+    /** With `orgId`: only the links the caller created ("My Links"). */
+    mine?: boolean;
 }
 
 export const EMPTY_SCOPE: LinkListScope = {
@@ -59,7 +61,8 @@ export function sameScope(a: LinkListScope, b: LinkListScope): boolean {
     return a.search === b.search
         && a.orgId === b.orgId
         && a.folderId === b.folderId
-        && a.tagId === b.tagId;
+        && a.tagId === b.tagId
+        && !!a.mine === !!b.mine;
 }
 
 /** Personal links, with no folder or tag filter: the account-wide totals apply. */
@@ -76,6 +79,7 @@ export function linksQuery(scope: LinkListScope, limit: number, offset: number):
     if (offset > 0) params.set('offset', String(offset));
     if (scope.search) params.set('search', scope.search);
     if (scope.orgId != null) params.set('org_id', String(scope.orgId));
+    if (scope.orgId != null && scope.mine) params.set('mine', 'true');
     if (scope.folderId != null) params.set('folder_id', String(scope.folderId));
     if (scope.tagId != null) params.set('tag_id', String(scope.tagId));
     return params.toString();

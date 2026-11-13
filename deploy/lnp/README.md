@@ -17,7 +17,9 @@ Kept small so they carry across upstream releases:
 - `backend/src/handlers/google_auth.rs` (new): `POST /auth/google` signs in a Google account from an allowed email domain. The login page sends the one-time code from Google's popup; the backend redeems it and checks the ID token. Off unless `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_ALLOWED_DOMAINS` are set. `GET /auth/settings` then carries `google_client_id`.
 - `backend/src/handlers/cf_access.rs` (new): `POST /auth/cf-access` signs in the person Cloudflare Access authenticated, from the `Cf-Access-Jwt-Assertion` header. Off unless `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set. Only the Claude connector uses it now.
 - `backend/src/handlers/verified_sign_in.rs` (new): what both of those do once the address is verified (find the account or create it, first account is admin), so they cannot drift. All three are registered in `handlers/mod.rs`, `lib.rs` and `openapi.rs`; `FIRST_ACCOUNT_ADMIN_LOCK` in `auth.rs` is `pub(crate)` so every sign-up path shares it.
+- `backend/src/handlers/default_org.rs` (new): the shared organization (below, "Shared links"). `verified_sign_in.rs` calls it after every sign-in; `links.rs`, `folders.rs` and `tags.rs` ask it which organization stands in for a member's personal scope when a request names none; and `GET /auth/settings` carries `default_org`. `GET /links` and `GET /links/export` take `mine=true`, and an organization's list names each link's creator (`created_by`) and says whether the caller may delete it (`can_delete`). Off unless `DEFAULT_ORG_NAME` and `DEFAULT_ORG_SLUG` are set.
 - `frontend/src/pages/Login.tsx`: when the settings carry `google_client_id`, the page shows "Sign in with Google" in place of the password form. `frontend/src/config/api.ts` names the endpoint.
+- `frontend/src/pages/Dashboard.tsx` and `src/components/dashboard/LinkViewToggle.tsx` (new): when the settings carry `default_org` and the account is a member, the dashboard works in that organization and offers "My Links" / "All LNP Links".
 - `frontend/nginx.conf` and `frontend/Dockerfile`: an `include /etc/nginx/site.d/*.conf;` point (empty in the stock image), and the `CSP_GOOGLE_SIGN_IN` build arg, which adds Google's sign-in sources to the Content-Security-Policy. Only the dashboard image sets it; without it the policy is the stock one.
 - `frontend/themes/lnp.js` and `frontend/themes/lnp/public/` (new): the Leadership Now Project look (navy, grey, Plus Jakarta Sans, square corners, LNP logo and icons), applied only when the frontend is built with `VITE_THEME=lnp` (the dashboard image). `tailwind.config.js` merges it in; `src/index.css` takes its body colours and fonts from the config; `Logo.tsx` shows the LNP logo; the Dockerfile copies the theme's icons over the stock ones. `src/designTokens.lnp.test.ts` checks its colours for WCAG AA contrast.
 - `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only. `deploy/lnp/mcp/` is the Claude connector (below); it uses the published `opn-mcp` package unchanged.
@@ -62,6 +64,26 @@ Moving from Cloudflare Access to Google sign-in, in this order:
 3. Only then remove the Access application from `links.leadershipnowproject.com`. Leave the connector's Access application (`links-mcp.…`) alone, and take the removed application's AUD tag out of `CF_ACCESS_AUD` so only the connector's is left.
 
 If a staff account is refused in step 2, the backend log says why (`Google sign-in refused: …`), without the address.
+
+## Shared links
+
+All staff links live in one organization, so nobody's links are out of reach when they are away or leave. `.env`:
+
+```
+DEFAULT_ORG_NAME=Leadership Now Project
+DEFAULT_ORG_SLUG=lnp
+DEFAULT_ORG_ADMINS=jay.shapiro@leadershipnowproject.com,marie@leadershipnowproject.com,dan.mathis@leadershipnowproject.com
+```
+
+- **Joining.** Each account joins the organization the next time it signs in (dashboard or Claude connector), as an editor. There is no manual step. The organization itself is created at the first sign-in after the setting is deployed; its owner is the first address in `DEFAULT_ORG_ADMINS` that already has an account.
+- **Admins.** An address in `DEFAULT_ORG_ADMINS` becomes an admin at its next sign-in. The list only promotes: taking an address off it does not demote that person. Change a role by hand under Teams.
+- **Existing links.** At that same sign-in the person's personal links, folders and tags move into the organization, once. A link in the trash is not moved. Until a colleague has signed in again, their older links are not in "All LNP Links" yet.
+- **New links** are created in the organization, from the dashboard and from the Claude connector alike. The same goes for new folders and tags, and the connector lists the organization's folders and tags.
+- **The dashboard** opens on "My Links" (the links you created) and switches to "All LNP Links", which shows who created each one. The choice is remembered per browser.
+- **Who can do what** is the organization rule: every member sees and edits every link; deleting is for the link's creator and for admins. Folders and tags are shared: everyone sees and can use and rename all of them, and two people's folders of the same name both appear.
+- Links that expire: the reminder email is for personal links only, so links in the organization get none (this deployment has no SMTP anyway).
+
+Do not change `DEFAULT_ORG_SLUG` afterwards: the slug is how the organization is found, and a new slug makes a new, empty one. To turn the feature off, blank the name or the slug; the organization and its links stay as they are, and people then see them under Teams.
 
 ## Claude connector
 

@@ -82,6 +82,11 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_ALLOWED_DOMAINS: ${GOOGLE_ALLOWED_DOMAINS:-leadershipnowproject.com,leadershipnowproject.org}
       GOOGLE_REQUIRE_HD: ${GOOGLE_REQUIRE_HD:-}
+      # The shared organization every staff account joins at sign-in
+      # (backend/src/handlers/default_org.rs). Off while name or slug is blank.
+      DEFAULT_ORG_NAME: ${DEFAULT_ORG_NAME:-}
+      DEFAULT_ORG_SLUG: ${DEFAULT_ORG_SLUG:-}
+      DEFAULT_ORG_ADMINS: ${DEFAULT_ORG_ADMINS:-}
       # The Claude connector's sign-in, through Cloudflare Access
       # (backend/src/handlers/cf_access.rs). The dashboard does not use it.
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:?set CF_ACCESS_TEAM_DOMAIN in .env}

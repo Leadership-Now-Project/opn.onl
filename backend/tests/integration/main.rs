@@ -76,6 +76,7 @@ mod org_link_access_tests;
 mod org_link_reassign_bio_tests;
 mod org_list_query_tests;
 mod org_membership_tests;
+mod org_mine_filter_tests;
 mod org_owner_deletion_policy_tests;
 mod org_ownership_race_tests;
 mod org_role_and_audit_tests;

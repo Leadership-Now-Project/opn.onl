@@ -201,6 +201,14 @@ pub fn listed_links(user_id: i32, org_id: Option<i32>) -> Condition {
     }
 }
 
+/// Narrow a list to the links `user_id` created ("My Links" inside an
+/// organization). A filter on top of [`listed_links`], never a grant: it adds
+/// no link the caller could not already read, and no handler may authorize
+/// with it.
+pub fn created_by(user_id: i32) -> Condition {
+    Condition::all().add(links::Column::UserId.eq(user_id))
+}
+
 /// Live links that still belong to this account: [`own_links`], excluding
 /// soft-deleted rows. Create, bulk create, clone and the profile's
 /// `link_count` all use this, so a link in an organization the user has left

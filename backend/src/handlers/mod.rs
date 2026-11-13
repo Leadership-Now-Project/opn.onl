@@ -5,6 +5,7 @@ pub mod auth;
 pub mod bio;
 pub mod cf_access;
 pub mod contact;
+pub mod default_org;
 pub mod folders;
 pub mod google_auth;
 pub mod link_access;

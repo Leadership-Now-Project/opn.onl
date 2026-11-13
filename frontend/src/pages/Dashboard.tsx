@@ -25,6 +25,8 @@ import CreateLinkForm from '../components/dashboard/CreateLinkForm';
 import CreateCard, { type CreateTab } from '../components/dashboard/CreateCard';
 import LinkFilters from '../components/dashboard/LinkFilters';
 import LinkRow from '../components/dashboard/LinkRow';
+import LinkViewToggle from '../components/dashboard/LinkViewToggle';
+import { readLinkView, rememberLinkView, type LinkView } from '../components/dashboard/linkView';
 import BulkActionBar, { SelectAllCheckbox } from '../components/dashboard/BulkActionBar';
 import { BULK_IDS_PER_REQUEST, bulkAffectedCount, bulkResultMessage, bulkStoppedMessage, runBulkChunks } from '../components/dashboard/bulkActions';
 import type { AppSettings, LinkData, LinkSortBy, LinkSortOrder, LinkUpdatePayload, SparklineSeries } from '../components/dashboard/types';
@@ -118,17 +120,27 @@ export default function Dashboard() {
     const [bulkReport, setBulkReport] = useState<BulkReport | null>(null);
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
-    const orgId = parsePositiveId(searchParams.get('org'));
+    const urlOrgId = parsePositiveId(searchParams.get('org'));
     const folderId = parsePositiveId(searchParams.get('folder'));
     const tagId = parsePositiveId(searchParams.get('tag'));
     const [orgs, setOrgs] = useState<OrgOption[]>([]);
+    // The instance's shared organization, once /auth/settings has named it
+    // and GET /orgs has confirmed this account is a member. Its members work
+    // in it: with no team in the URL the page lists, files and creates there.
+    const defaultOrgId = appSettings.default_org?.id ?? null;
+    const defaultOrg = defaultOrgId != null ? orgs.find(org => org.id === defaultOrgId) ?? null : null;
+    const orgId = urlOrgId ?? defaultOrg?.id ?? null;
+    const inDefaultOrg = defaultOrg != null && orgId === defaultOrg.id;
+    // "My Links" or everyone's, in the shared organization only.
+    const [linkView, setLinkView] = useState<LinkView>(readLinkView);
+    const mine = inDefaultOrg && linkView === 'mine';
     // True once GET /orgs has answered, so an empty list means "no teams".
     const [orgsLoaded, setOrgsLoaded] = useState(false);
     const [folders, setFolders] = useState<CatalogItem[]>([]);
     const [tags, setTags] = useState<CatalogItem[]>([]);
     // The folder/tag/org the rows on screen were fetched with. The URL can
     // move ahead of that while a request is in flight.
-    const [listedFilters, setListedFilters] = useState({ orgId: null as number | null, folderId: null as number | null, tagId: null as number | null });
+    const [listedFilters, setListedFilters] = useState({ orgId: null as number | null, folderId: null as number | null, tagId: null as number | null, mine: false });
     const linksFetchId = useRef(0);
     const sparklineFetchId = useRef(0);
     const bulkInFlight = useRef(false);
@@ -137,8 +149,8 @@ export default function Dashboard() {
     // `scope` is the last fetch that landed, not the URL, so a new filter
     // starts from the first page instead of asking for every row already shown.
     const listRef = useRef({ loaded: 0, scope: EMPTY_SCOPE });
-    const urlScopeRef = useRef({ orgId, folderId, tagId });
-    urlScopeRef.current = { orgId, folderId, tagId };
+    const urlScopeRef = useRef({ orgId, folderId, tagId, mine });
+    urlScopeRef.current = { orgId, folderId, tagId, mine };
     const folderReq = useRef(0);
     const tagReq = useRef(0);
     // IDs removed locally while a fetchLinks was in flight. Stale responses
@@ -321,13 +333,13 @@ export default function Dashboard() {
     // Reset to page 1 when the list being asked for changes.
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchQuery, orgId, folderId, tagId]);
+    }, [searchQuery, orgId, folderId, tagId, mine]);
 
     // A selection is the rows on the page the user is looking at. A new page
     // or a new search shows different rows, so the old ticks would lie.
     useEffect(() => {
         setSelectedIds(prev => (prev.size === 0 ? prev : new Set()));
-    }, [currentPage, searchQuery, orgId, folderId, tagId]);
+    }, [currentPage, searchQuery, orgId, folderId, tagId, mine]);
 
     // Sorting, a pin, a create or a delete can move a ticked row off this page
     // while the page number stays. Its tick goes with it, or the row would
@@ -389,7 +401,7 @@ export default function Dashboard() {
                 setLinks(data);
                 setTotal(count);
                 setActiveSearch(search);
-                setListedFilters({ orgId: scope.orgId, folderId: scope.folderId, tagId: scope.tagId });
+                setListedFilters({ orgId: scope.orgId, folderId: scope.folderId, tagId: scope.tagId, mine: !!scope.mine });
                 listRef.current = { loaded: data.length, scope };
                 if (isUnfilteredAccount(scope)) setAccountTotal(count);
             } else {
@@ -459,17 +471,17 @@ export default function Dashboard() {
         return () => clearTimeout(timer);
     }, [loading, searchTerm, activeSearch, links.length, total]);
 
-    // Folder, tag and team live in the URL. A change asks for that list from
-    // the first page. Typing in the search box does not: the ids still match
+    // Folder, tag and team live in the URL; "My Links" or everyone's is the
+    // toggle. A change asks for that list from the first page. Typing in the search box does not: the ids still match
     // the list on screen, and the effect above owns the search request.
     // Failure leaves `loading` as it is, so a 500 cannot re-run this forever.
     useEffect(() => {
         if (loading) return;
         const current = listRef.current.scope;
-        if (current.orgId === orgId && current.folderId === folderId && current.tagId === tagId) return;
+        if (current.orgId === orgId && current.folderId === folderId && current.tagId === tagId && !!current.mine === mine) return;
         const timer = window.setTimeout(() => { void fetchLinks(searchTerm); }, 0);
         return () => window.clearTimeout(timer);
-    }, [loading, orgId, folderId, tagId, searchTerm]);
+    }, [loading, orgId, folderId, tagId, mine, searchTerm]);
 
     // Fetch sparkline data for the given links. Batch ids so a large account
     // cannot blow typical request-line limits (~8KB) with one query string.
@@ -814,8 +826,12 @@ export default function Dashboard() {
 
     const handleExport = async () => {
         try {
+            const exportParams = new URLSearchParams();
+            if (orgId != null) exportParams.set('org_id', String(orgId));
+            // The file holds what the list shows: only the caller's in "My Links".
+            if (orgId != null && mine) exportParams.set('mine', 'true');
             const exportUrl = orgId != null
-                ? `${API_ENDPOINTS.exportLinks}?${new URLSearchParams({ org_id: String(orgId) })}`
+                ? `${API_ENDPOINTS.exportLinks}?${exportParams}`
                 : API_ENDPOINTS.exportLinks;
             const response = await authFetch(exportUrl);
 
@@ -1094,7 +1110,18 @@ export default function Dashboard() {
             </div>
 
             <section aria-labelledby="shared-links-heading" className="min-w-0 lg:col-span-2 lg:col-start-1 lg:row-start-1">
-            <h2 id="shared-links-heading" className="font-display text-lg font-bold text-ink tracking-tight mb-4">Shared Links</h2>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <h2 id="shared-links-heading" className="font-display text-lg font-bold text-ink tracking-tight">Shared Links</h2>
+                {inDefaultOrg && (
+                    <LinkViewToggle
+                        value={linkView}
+                        onChange={(view) => {
+                            rememberLinkView(view);
+                            setLinkView(view);
+                        }}
+                    />
+                )}
+            </div>
 
             {/* Search and filter stay up with no links, so the first folder can be created here. */}
             <LinkFilters
@@ -1106,6 +1133,7 @@ export default function Dashboard() {
                 onSortOrderChange={setSortOrder}
                 orgs={orgs}
                 orgId={orgId}
+                noPersonal={defaultOrg != null}
                 onOrgChange={(id) => {
                     replaceParams((next) => {
                         if (id == null) next.delete('org');
@@ -1196,6 +1224,7 @@ export default function Dashboard() {
                                     onDelete={handleDelete}
                                     folder={link.folder_id != null ? folderById.get(link.folder_id) ?? null : null}
                                     readOnly={readOnly}
+                                    showCreator={inDefaultOrg && listedFilters.orgId === orgId && !listedFilters.mine}
                                 />
                             );
                         })}
@@ -1262,7 +1291,9 @@ export default function Dashboard() {
 
                 {filteredLinks.length === 0 && !searchQuery && scopeFiltered && !error && (
                     <div className="py-12 text-center text-muted">
-                        No links in this view
+                        {listedFilters.mine && listedFilters.folderId == null && listedFilters.tagId == null
+                            ? 'You have not created any links yet'
+                            : 'No links in this view'}
                     </div>
                 )}
 

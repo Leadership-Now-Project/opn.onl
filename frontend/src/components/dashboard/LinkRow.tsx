@@ -37,6 +37,8 @@ interface LinkRowProps {
     folder?: { name: string; color?: string | null } | null;
     /** A team viewer's row: no selection, pin, clone, edit or delete, which the API refuses them. */
     readOnly?: boolean;
+    /** Name who created the link (a list of everyone's links). */
+    showCreator?: boolean;
     // AnimatePresence mode="popLayout" measures the row by cloning it with a ref.
     ref?: Ref<HTMLDivElement>;
 }
@@ -62,6 +64,7 @@ export default function LinkRow({
     onDelete,
     folder = null,
     readOnly = false,
+    showCreator = false,
     ref,
 }: LinkRowProps) {
     const mainUrl = `${shortLinkBase()}/${link.code}`;
@@ -70,6 +73,10 @@ export default function LinkRow({
     const status = rowStatus(link);
     const reason = status.badge;
     const capReached = clickCapReached(link);
+    const creator = showCreator ? link.created_by ?? null : null;
+    // An editor may change a colleague's link but not delete it: the list
+    // says so, and the button the API would refuse is not offered.
+    const canDelete = link.can_delete !== false;
 
     const neutralBadge = 'inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 text-xs font-medium text-muted';
     const dangerBadge = 'inline-flex items-center gap-1 rounded border border-danger/30 bg-danger/5 px-2 py-0.5 text-xs font-medium text-danger';
@@ -188,6 +195,11 @@ export default function LinkRow({
                                 </span>
                             )}
                         </div>
+                        {creator && (
+                            <p className="text-xs text-muted" title={creator.email}>
+                                Created by <span className="font-medium text-ink">{creator.name || creator.email}</span>
+                            </p>
+                        )}
                         {/* API URL */}
                         <p className="font-mono text-xs text-faint">
                             API: <a href={apiUrl} target="_blank" rel="noreferrer" className="underline decoration-line2 underline-offset-2 hover:text-muted hover:decoration-current">{apiUrl}</a>
@@ -294,14 +306,16 @@ export default function LinkRow({
                                     >
                                         <Edit2 className="h-4 w-4" />
                                     </button>
-                                    <button
-                                        onClick={() => onDelete(link.id)}
-                                        className="rounded-md p-2 text-faint transition-colors hover:bg-danger/5 hover:text-danger"
-                                        title="Delete"
-                                        aria-label={`Delete link ${link.code}`}
-                                    >
-                                        <Trash2 className="h-4 w-4" />
-                                    </button>
+                                    {canDelete && (
+                                        <button
+                                            onClick={() => onDelete(link.id)}
+                                            className="rounded-md p-2 text-faint transition-colors hover:bg-danger/5 hover:text-danger"
+                                            title="Delete"
+                                            aria-label={`Delete link ${link.code}`}
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                        </button>
+                                    )}
                                 </>
                             )}
                         </div>
