@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
-import { IS_LNP } from '../config/theme';
+import { IS_LNP, SITE_NAME } from '../config/theme';
 import { Home, Search, ArrowLeft } from 'lucide-react';
 import { Helmet } from 'react-helmet-async';
 
@@ -8,7 +8,7 @@ export default function NotFound() {
   return (
     <>
       <Helmet>
-        <title>Page Not Found - opn.onl</title>
+        <title>{`Page Not Found - ${SITE_NAME}`}</title>
         <meta name="description" content="The page you're looking for doesn't exist or has been moved." />
         <meta name="robots" content="noindex, nofollow" />
       </Helmet>
