@@ -274,7 +274,7 @@ async fn completed_link(state: &AppState, upload: &link_files::Model) -> Respons
     responses(
         (status = 201, description = "Link created", body = LinkResponse),
         (status = 200, description = "The upload was already completed: its link", body = LinkResponse),
-        (status = 400, description = "The file has not been uploaded, or an invalid link field"),
+        (status = 400, description = "The file has not been uploaded, `expires_at` is in the past, or an invalid link field"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Not the caller's upload (also for an id that does not exist), or a link rule refused it"),
         (status = 404, description = "File sharing is not set up on this instance"),
@@ -311,6 +311,20 @@ pub async fn complete_upload(
         return json_error(
             StatusCode::GONE,
             "This upload has expired. Upload the file again.",
+        );
+    }
+
+    // A file link that is already expired would answer 410 from its first
+    // visit and lose its file at the next sweep. Refused before the link is
+    // made; the upload stays pending, so the same call works with a later
+    // date. (A repeat of a completed upload was answered above.)
+    if payload
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "The expiry date is in the past. Choose a later date.",
         );
     }
 

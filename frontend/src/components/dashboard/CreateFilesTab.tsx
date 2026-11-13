@@ -11,6 +11,7 @@ import {
 } from '../../config/api';
 import logger from '../../utils/logger';
 import { formatBytes } from '../../utils/fileSize';
+import { localIsoDate } from '../../utils/localIsoDate';
 import { pluralize } from '../../utils/plural';
 import { putFile, UploadCancelled } from '../../utils/uploadFile';
 import AliasField from './AliasField';
@@ -309,6 +310,7 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
                                 disabled={busy}
                                 aria-describedby="file-expires-help"
                                 onChange={(e) => setExpiresAt(e.target.value)}
+                                min={localIsoDate()}
                             />
                             <p id="file-expires-help" className="mt-1.5 text-xs text-faint">
                                 Leave empty and the link never expires. When a link expires or is deleted, its file is deleted too.

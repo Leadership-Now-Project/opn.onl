@@ -1789,3 +1789,381 @@ async fn a_file_link_left_behind_when_the_bucket_is_unset_is_a_dead_link() {
     assert_eq!(res.status_code(), 410, "{}", res.text());
     assert!(res.maybe_header(LOCATION).is_none());
 }
+
+// ------------------------------------------- the review's fixes and guards
+
+#[tokio::test]
+async fn an_expiry_in_the_past_is_refused_and_the_upload_can_be_retried() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let (upload_id, key) = bucket
+        .uploaded(&alice, "a.pdf", "application/pdf", 10)
+        .await;
+    let app = bucket.app().await;
+    let path = format!("/files/uploads/{upload_id}/complete");
+
+    let res = app
+        .post(&path)
+        .authorization_bearer(&alice.token)
+        .json(&json!({"expires_at": "2020-01-01T23:59:00Z"}))
+        .await;
+    assert_eq!(res.status_code(), 400, "{}", res.text());
+    let error = res.json::<Value>()["error"]
+        .as_str()
+        .expect("a JSON error")
+        .to_string();
+    assert!(error.contains("in the past"), "{error}");
+
+    // No link was made, and the upload is as it was: pending, in the bucket.
+    assert_eq!(links_of(&bucket.db, alice.id).await, 0);
+    let row = file_row(&bucket.db, &key).await;
+    assert_eq!(row.status, "pending");
+    assert_eq!(row.link_id, None);
+    assert_eq!(row.deleted_at, None);
+    assert!(bucket.store.contains(&key));
+
+    // The same upload completes with a date that is still ahead.
+    let res = app
+        .post(&path)
+        .authorization_bearer(&alice.token)
+        .json(&json!({"expires_at": "2099-01-01T23:59:00Z"}))
+        .await;
+    assert_eq!(res.status_code(), 201, "{}", res.text());
+    assert_eq!(res.json::<Value>()["is_active"], true);
+    assert_eq!(links_of(&bucket.db, alice.id).await, 1);
+}
+
+/// The ids `GET {path}` lists.
+async fn listed_ids(app: &axum_test::TestServer, who: &Person, path: &str) -> Vec<i64> {
+    let res = app.get(path).authorization_bearer(&who.token).await;
+    assert_eq!(res.status_code(), 200, "{path}: {}", res.text());
+    res.json::<Vec<Value>>()
+        .iter()
+        .map(|item| item["id"].as_i64().expect("id"))
+        .collect()
+}
+
+#[tokio::test]
+async fn search_finds_a_file_link_by_its_filename_and_never_by_its_marker() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let word = format!("budget{}", unique_code().to_lowercase());
+    let (link, key) = bucket
+        .shared(
+            &alice,
+            &format!("{word}.pdf"),
+            "application/pdf",
+            10,
+            json!({"title": "Q3 numbers"}),
+        )
+        .await;
+    let id = link["id"].as_i64().unwrap();
+    let file = file_row(&bucket.db, &key).await;
+    let marker = link_row(&bucket.db, id).await.original_url;
+    assert_eq!(marker, format!("opn-file:{}", file.id));
+    let app = bucket.app().await;
+
+    // By the filename, in any case, although the title says something else.
+    for search in [word.clone(), word.to_uppercase(), format!("{word}.pdf")] {
+        assert_eq!(
+            listed_ids(&app, &alice, &format!("/links?search={search}")).await,
+            vec![id],
+            "search={search}"
+        );
+    }
+    // Never by the marker, whole or in part. Alice has this one link, so any
+    // hit is the marker matching.
+    for search in ["opn-file", "opn", "file:", marker.as_str()] {
+        assert_eq!(
+            listed_ids(&app, &alice, &format!("/links?search={search}")).await,
+            Vec::<i64>::new(),
+            "search={search}"
+        );
+    }
+    // The other fields are searched as before.
+    assert_eq!(
+        listed_ids(&app, &alice, "/links?search=q3%20numbers").await,
+        vec![id]
+    );
+    assert_eq!(
+        listed_ids(&app, &alice, &format!("/links?search={}", code(&link))).await,
+        vec![id]
+    );
+
+    // The search narrows what the caller may list, and nothing more.
+    let stranger = person(&bucket.db).await;
+    assert_eq!(
+        listed_ids(&app, &stranger, &format!("/links?search={word}")).await,
+        Vec::<i64>::new()
+    );
+
+    // The admin list follows the same rule.
+    let admin = person_with(&bucket.db, true, true).await;
+    let admin_search = |search: String| {
+        let (app, token, user_id) = (&app, &admin.token, alice.id);
+        async move {
+            let res = app
+                .get("/admin/links")
+                .add_query_param("user_id", user_id)
+                .add_query_param("search", &search)
+                .authorization_bearer(token)
+                .await;
+            assert_eq!(res.status_code(), 200, "{search}: {}", res.text());
+            res.text()
+        }
+    };
+    assert!(admin_search(word.clone()).await.contains(code(&link)));
+    assert!(
+        !admin_search("opn-file".to_string())
+            .await
+            .contains(code(&link))
+    );
+
+    // A file that was removed from the bucket is no longer searched.
+    let mut removed: link_files::ActiveModel = file.into();
+    removed.deleted_at = Set(Some(chrono::Utc::now().naive_utc()));
+    removed.update(&bucket.db).await.unwrap();
+    assert_eq!(
+        listed_ids(&app, &alice, &format!("/links?search={word}")).await,
+        Vec::<i64>::new()
+    );
+}
+
+#[tokio::test]
+async fn a_one_time_file_link_is_used_up_in_the_database_by_its_one_visit() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let (link, _) = bucket
+        .shared(&alice, "a.pdf", "application/pdf", 10, json!({}))
+        .await;
+    let link_id = link["id"].as_i64().unwrap();
+    let mut row: links::ActiveModel = link_row(&bucket.db, link_id).await.into();
+    row.burn_after_reading = Set(true);
+    row.update(&bucket.db).await.unwrap();
+    let path = format!("/{}", code(&link));
+
+    // Two apps are two processes' worth of click buffers: the second knows
+    // nothing of the first one's visit except what is in the database. Only
+    // the conditional UPDATE that consumes the click can refuse it.
+    let (first, second) = (bucket.app().await, bucket.app().await);
+    assert_eq!(first.get(&path).await.status_code(), 302);
+    let row = link_row(&bucket.db, link_id).await;
+    assert_eq!(row.click_count, 1, "the visit was consumed at once");
+    assert!(row.burned_at.is_some());
+
+    let again = second.get(&path).await;
+    assert_eq!(again.status_code(), 410, "{}", again.text());
+    assert_eq!(
+        bucket.store.downloads().len(),
+        1,
+        "only the one visit got an address"
+    );
+}
+
+#[tokio::test]
+async fn a_file_link_with_the_interstitial_signs_nothing_until_the_visitor_confirms() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let (link, _) = bucket
+        .shared(&alice, "a.pdf", "application/pdf", 10, json!({}))
+        .await;
+    let mut row: links::ActiveModel = link_row(&bucket.db, link["id"].as_i64().unwrap())
+        .await
+        .into();
+    row.safe_link_interstitial = Set(true);
+    row.update(&bucket.db).await.unwrap();
+    let path = format!("/{}", code(&link));
+    let app = bucket.app().await;
+
+    let res = app.get(&path).await;
+    assert_eq!(res.status_code(), 307, "{}", res.text());
+    let location = res.header(LOCATION).to_str().unwrap().to_string();
+    assert!(
+        location.contains(&format!("/r/{}", code(&link))),
+        "sent to the interstitial page: {location}"
+    );
+    assert!(
+        bucket.store.downloads().is_empty(),
+        "nothing is signed before the visitor confirms"
+    );
+
+    let confirmed = app.get(&path).add_query_param("confirm", "1").await;
+    assert_eq!(confirmed.status_code(), 302, "{}", confirmed.text());
+    assert_eq!(bucket.store.downloads().len(), 1);
+}
+
+#[tokio::test]
+async fn the_preview_of_a_live_file_link_says_it_is_live() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let (link, key) = bucket
+        .shared(&alice, "a.pdf", "application/pdf", 10, json!({}))
+        .await;
+
+    // The password page and the interstitial read this. The marker is not a
+    // URL the blocklist can judge, so it must not be asked.
+    let res = bucket
+        .app()
+        .await
+        .get(&format!("/{}/preview", code(&link)))
+        .await;
+    assert_eq!(res.status_code(), 200, "{}", res.text());
+    let preview: Value = res.json();
+    assert_eq!(preview["is_active"], true, "{preview}");
+    assert_eq!(preview["inactive_reason"], Value::Null, "{preview}");
+    assert_eq!(preview["original_url"], "");
+    assert_no_storage_details(&res.text(), &key, "the preview");
+}
+
+#[tokio::test]
+async fn an_upload_the_sweep_closed_while_it_was_being_completed_gets_no_link() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let (upload_id, key) = bucket
+        .uploaded(&alice, "a.pdf", "application/pdf", 10)
+        .await;
+    let file_id = file_row(&bucket.db, &key).await.id;
+    let app = bucket.app().await;
+
+    // The complete reads the upload as open and stops while asking the bucket.
+    // In that gap the sweep closes the upload: it stamps the row as removed.
+    // (The object is left in place here so that the complete goes on to the
+    // claim; in production the sweep's delete may land just after the HEAD.)
+    let gate = bucket.store.hold_next_head();
+    let complete = async {
+        app.post(&format!("/files/uploads/{upload_id}/complete"))
+            .authorization_bearer(&alice.token)
+            .json(&json!({}))
+            .await
+    };
+    let sweep = async {
+        tokio::time::timeout(Duration::from_secs(20), gate.arrived())
+            .await
+            .expect("the complete never asked the bucket about its upload");
+        let mut closed: link_files::ActiveModel = link_files::Entity::find_by_id(file_id)
+            .one(&bucket.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        closed.deleted_at = Set(Some(chrono::Utc::now().naive_utc()));
+        closed.update(&bucket.db).await.unwrap();
+        gate.release();
+    };
+    let (res, ()) = tokio::join!(complete, sweep);
+
+    assert_eq!(res.status_code(), 410, "{}", res.text());
+    assert_eq!(
+        links_of(&bucket.db, alice.id).await,
+        0,
+        "no link may be joined to a file the sweep removed"
+    );
+    let row = file_row(&bucket.db, &key).await;
+    assert_eq!(row.link_id, None);
+    assert_eq!(row.status, "pending");
+}
+
+#[tokio::test]
+async fn deleting_an_account_removes_the_files_of_the_organization_that_goes_with_it() {
+    let bucket = Bucket::new().await;
+    let admin = person_with(&bucket.db, true, true).await;
+    let owner = person(&bucket.db).await;
+    let colleague = person(&bucket.db).await;
+    let org = organizations::ActiveModel {
+        name: Set("Team".to_string()),
+        slug: Set(format!("team-{}", unique_code().to_lowercase())),
+        owner_id: Set(owner.id),
+        ..Default::default()
+    }
+    .insert(&bucket.db)
+    .await
+    .unwrap();
+    for (who, role) in [(&owner, "owner"), (&colleague, "editor")] {
+        org_members::ActiveModel {
+            org_id: Set(org.id),
+            user_id: Set(who.id),
+            role: Set(role.to_string()),
+            ..Default::default()
+        }
+        .insert(&bucket.db)
+        .await
+        .unwrap();
+    }
+    // The colleague shares a file in the organization and then leaves it. The
+    // link is the organization's; its creator is not the owner.
+    let (link, key) = bucket
+        .shared(
+            &colleague,
+            "plan.pdf",
+            "application/pdf",
+            10,
+            json!({"org_id": org.id}),
+        )
+        .await;
+    let link_id = link["id"].as_i64().unwrap();
+    assert_eq!(
+        link_row(&bucket.db, link_id).await.user_id,
+        Some(colleague.id)
+    );
+    org_members::Entity::delete_many()
+        .filter(org_members::Column::OrgId.eq(org.id))
+        .filter(org_members::Column::UserId.eq(colleague.id))
+        .exec(&bucket.db)
+        .await
+        .unwrap();
+
+    // The owner is now alone in it, so the organization goes with the account.
+    let res = bucket
+        .app()
+        .await
+        .delete(&format!("/admin/users/{}", owner.id))
+        .authorization_bearer(&admin.token)
+        .await;
+    assert_eq!(res.status_code(), 200, "{}", res.text());
+    assert!(
+        link_row(&bucket.db, link_id).await.deleted_at.is_some(),
+        "the organization's link went down with its owner"
+    );
+    assert!(
+        !bucket.store.contains(&key),
+        "and its file went at once, not at the next daily sweep"
+    );
+    assert!(file_row(&bucket.db, &key).await.deleted_at.is_some());
+}
+
+#[tokio::test]
+async fn completing_again_after_the_link_was_deleted_answers_410() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let (upload_id, _) = bucket
+        .uploaded(&alice, "a.pdf", "application/pdf", 10)
+        .await;
+    let app = bucket.app().await;
+    let complete = || {
+        app.post(&format!("/files/uploads/{upload_id}/complete"))
+            .authorization_bearer(&alice.token)
+            .json(&json!({}))
+    };
+    let first = complete().await;
+    assert_eq!(first.status_code(), 201, "{}", first.text());
+    let link: Value = first.json();
+
+    let deleted = app
+        .delete(&format!("/links/{}", link["id"]))
+        .authorization_bearer(&alice.token)
+        .await;
+    assert!(deleted.status_code().is_success(), "{}", deleted.text());
+
+    let again = complete().await;
+    assert_eq!(again.status_code(), 410, "{}", again.text());
+    assert!(
+        !again.text().contains(code(&link)),
+        "a deleted link is not handed back: {}",
+        again.text()
+    );
+    assert_eq!(
+        links_of(&bucket.db, alice.id).await,
+        1,
+        "and no new link is made for a file that is gone"
+    );
+}

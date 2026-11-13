@@ -3024,7 +3024,9 @@ pub async fn get_all_links(
         finder = finder.filter(
             Condition::any()
                 .add(Expr::col((links::Entity, links::Column::Code)).ilike(pattern.clone()))
-                .add(Expr::col((links::Entity, links::Column::OriginalUrl)).ilike(pattern.clone()))
+                // Never the internal marker of a file link: its filename.
+                .add(crate::handlers::links::url_matches(&pattern))
+                .add(crate::handlers::links::file_name_matches(&pattern))
                 .add(Expr::col((links::Entity, links::Column::Title)).ilike(pattern.clone()))
                 .add(Expr::col((users::Entity, users::Column::Email)).ilike(pattern)),
         );

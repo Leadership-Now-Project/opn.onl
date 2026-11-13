@@ -4900,6 +4900,38 @@ fn tag_name_matches(user_id: i32, pattern: &str) -> sea_orm::sea_query::SimpleEx
     )
 }
 
+/// The destination arm of a link search: `original_url` matches `pattern`
+/// (`ilike_pattern` output) and is a real URL. A file link's `original_url` is
+/// an internal marker (`opn-file:<id>`) that no response shows, so it is never
+/// searched: a file link is found by its filename, see [`file_name_matches`].
+pub(crate) fn url_matches(pattern: &str) -> Condition {
+    Condition::all()
+        .add(Expr::col((links::Entity, links::Column::OriginalUrl)).ilike(pattern))
+        .add(
+            Expr::col((links::Entity, links::Column::OriginalUrl))
+                .not_like(format!("{}%", links::FILE_LINK_PREFIX)),
+        )
+}
+
+/// `EXISTS` for the file a link serves whose name matches `pattern`
+/// (`ilike_pattern` output). A file that was removed from the bucket is not
+/// searched. Correlated on `link_files.link_id`, so the `ILIKE` sees the one
+/// file of the candidate link.
+pub(crate) fn file_name_matches(pattern: &str) -> sea_orm::sea_query::SimpleExpr {
+    Expr::exists(
+        sea_orm::sea_query::Query::select()
+            .expr(Expr::val(1))
+            .from(link_files::Entity)
+            .and_where(
+                Expr::col((link_files::Entity, link_files::Column::LinkId))
+                    .equals((links::Entity, links::Column::Id)),
+            )
+            .and_where(Expr::col((link_files::Entity, link_files::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((link_files::Entity, link_files::Column::Filename)).ilike(pattern))
+            .to_owned(),
+    )
+}
+
 /// The creators of `rows` (live accounts only) and the caller's access, for an
 /// organization's link list. Two queries for the page, not one per link.
 async fn org_list_details(
@@ -4942,7 +4974,7 @@ async fn org_list_details(
     responses(
         (
             status = 200,
-            description = "The caller's non-deleted links, or every non-deleted link of the organization given by `org_id` when the caller is a member (only those the caller created with `mine=true`; each item then carries `created_by` and `can_delete`). Pinned links first, then newest first (limit defaults to 1000, maximum 1000). `search` is a case-insensitive substring match on URL, code, title, notes and the name of a tag in the link's scope. `bio_visible` keeps only links that are or are not on a bio page",
+            description = "The caller's non-deleted links, or every non-deleted link of the organization given by `org_id` when the caller is a member (only those the caller created with `mine=true`; each item then carries `created_by` and `can_delete`). Pinned links first, then newest first (limit defaults to 1000, maximum 1000). `search` is a case-insensitive substring match on URL, code, title, notes, the filename of a file link and the name of a tag in the link's scope. `bio_visible` keeps only links that are or are not on a bio page",
             body = Vec<LinkResponse>,
             headers(("X-Total-Count" = u64, description = "How many links match the filters, ignoring `limit` and `offset`"))
         ),
@@ -4983,7 +5015,8 @@ pub async fn get_user_links(
         link_query = link_query.filter(links::Column::FolderId.eq(folder_id));
     }
 
-    // Search by URL, code, title, notes, or an in-scope tag name: a
+    // Search by URL, code, title, notes, a file link's filename, or an
+    // in-scope tag name: a
     // case-insensitive substring match in which `%` and `_` are ordinary
     // characters. ILIKE '%…%' cannot use btree idx_links_original_url (or any
     // btree). A pg_trgm GIN index is the real answer if a column filter
@@ -4995,7 +5028,8 @@ pub async fn get_user_links(
         let pattern = ilike_pattern(&search);
         link_query = link_query.filter(
             Condition::any()
-                .add(Expr::col((links::Entity, links::Column::OriginalUrl)).ilike(pattern.clone()))
+                .add(url_matches(&pattern))
+                .add(file_name_matches(&pattern))
                 .add(Expr::col((links::Entity, links::Column::Code)).ilike(pattern.clone()))
                 .add(Expr::col((links::Entity, links::Column::Title)).ilike(pattern.clone()))
                 .add(Expr::col((links::Entity, links::Column::Notes)).ilike(pattern.clone()))

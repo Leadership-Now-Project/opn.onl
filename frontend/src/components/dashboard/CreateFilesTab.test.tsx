@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, mockToken, render, screen, waitFor } from '../../test/test-utils';
 import CreateFilesTab from './CreateFilesTab';
 import type { AppSettings } from './types';
+import { localIsoDate } from '../../utils/localIsoDate';
 import { putFile, UploadCancelled } from '../../utils/uploadFile';
 
 // The PUT to storage is the one call a test cannot let through: it is an
@@ -170,6 +171,15 @@ describe('CreateFilesTab', () => {
         fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Board pack' } });
         chooseFile(pdf('other.pdf'));
         expect(screen.getByLabelText('Title')).toHaveValue('Board pack');
+    });
+
+    it('offers no expiry date before today, like the other expiry fields', () => {
+        mockApi();
+        renderTab();
+        chooseFile(pdf('Q3 report.pdf'));
+
+        // A file link that is already expired loses its file at the next sweep.
+        expect(screen.getByLabelText('Expires (optional)')).toHaveAttribute('min', localIsoDate());
     });
 
     it('uploads with progress, then creates the link and reports it', async () => {
