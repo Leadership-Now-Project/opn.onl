@@ -43,6 +43,13 @@ RUN set -e; \
 # policy is exactly the stock one. Each placeholder sits directly before its
 # `;` in nginx.conf, so the leading space belongs to the value. Same guards as
 # above: fail if a placeholder is missing before or left over after.
+#
+# A policy can have one frame-src directive only (a second one is ignored), so
+# this step also decides where the media page's players go, further down
+# (CSP_MEDIA_EMBEDS): with Google sign-in they join its frame-src
+# (__CSP_MEDIA_SOURCES__), without it they get a frame-src of their own
+# (__CSP_MEDIA_DIRECTIVE__). Either marker becomes nothing unless
+# CSP_MEDIA_EMBEDS=true.
 ARG CSP_GOOGLE_SIGN_IN
 RUN set -e; \
     CONF=/etc/nginx/conf.d/default.conf; \
@@ -56,9 +63,9 @@ RUN set -e; \
         G_SCRIPT=" https://accounts.google.com/gsi/client"; \
         G_STYLE=" https://accounts.google.com/gsi/style"; \
         G_CONNECT=" https://accounts.google.com/gsi/"; \
-        G_FRAME=" frame-src https://accounts.google.com/gsi/__CSP_DRIVE_FRAME__;"; \
+        G_FRAME=" frame-src https://accounts.google.com/gsi/__CSP_DRIVE_FRAME____CSP_MEDIA_SOURCES__;"; \
     elif [ -z "$CSP_GOOGLE_SIGN_IN" ] || [ "$CSP_GOOGLE_SIGN_IN" = "false" ]; then \
-        G_SCRIPT=""; G_STYLE=""; G_CONNECT=""; G_FRAME=""; \
+        G_SCRIPT=""; G_STYLE=""; G_CONNECT=""; G_FRAME="__CSP_MEDIA_DIRECTIVE__"; \
     else \
         echo "ERROR: CSP_GOOGLE_SIGN_IN must be true, false or unset, not '$CSP_GOOGLE_SIGN_IN'"; \
         exit 1; \
@@ -146,6 +153,43 @@ RUN set -e; \
         exit 1; \
     fi; \
     echo "CSP Google Drive picker sources: '${D_SCRIPT}'"
+
+# Media links (src/pages/MediaPage.tsx) show a video in its host's own player,
+# in a frame: YouTube's (youtube-nocookie.com), Vimeo's (player.vimeo.com) or
+# Google Drive's (drive.google.com). The same three origins the backend builds
+# a player address on (EMBED_ORIGINS in backend/src/utils/media.rs) and the
+# page checks (MEDIA_EMBED_ORIGINS in src/utils/media.ts). Only the image that
+# serves short links for a deployment with media links sets
+# CSP_MEDIA_EMBEDS=true; without it both markers become nothing and the policy
+# is exactly what it was. Which marker is there was decided by the Google
+# sign-in step above: the players join that step's frame-src when there is
+# one, and otherwise get the policy's only frame-src, with 'self' in it so
+# that the page's own frames stay allowed as they are under default-src.
+ARG CSP_MEDIA_EMBEDS
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    if ! grep -q -e '__CSP_MEDIA_SOURCES__' -e '__CSP_MEDIA_DIRECTIVE__' "$CONF"; then \
+        echo "ERROR: no __CSP_MEDIA_ placeholder found in nginx.conf"; \
+        exit 1; \
+    fi; \
+    if [ "$CSP_MEDIA_EMBEDS" = "true" ]; then \
+        M_SOURCES=" https://www.youtube-nocookie.com https://player.vimeo.com https://drive.google.com"; \
+        M_DIRECTIVE=" frame-src 'self'${M_SOURCES};"; \
+    elif [ -z "$CSP_MEDIA_EMBEDS" ] || [ "$CSP_MEDIA_EMBEDS" = "false" ]; then \
+        M_SOURCES=""; M_DIRECTIVE=""; \
+    else \
+        echo "ERROR: CSP_MEDIA_EMBEDS must be true, false or unset, not '$CSP_MEDIA_EMBEDS'"; \
+        exit 1; \
+    fi; \
+    sed -i \
+        -e "s#__CSP_MEDIA_SOURCES__#${M_SOURCES}#g" \
+        -e "s#__CSP_MEDIA_DIRECTIVE__#${M_DIRECTIVE}#g" \
+        "$CONF"; \
+    if grep -q '__CSP_MEDIA_' "$CONF"; then \
+        echo "ERROR: a __CSP_MEDIA_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP media embed sources: '${M_SOURCES}'"
 
 # Build stage - use full Node image for Puppeteer/Chromium support
 FROM node:22-slim AS builder
