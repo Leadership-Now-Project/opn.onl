@@ -203,6 +203,14 @@ describe('what our server accepts for a Drive file', () => {
 
     it.each([
         'http://drive.google.com/file/d/abc/view',
+        // Each parses to drive.google.com, and none is written out in full.
+        'https:drive.google.com/file/d/abc/view',
+        'https:/drive.google.com/file/d/abc/view',
+        'https:///drive.google.com/file/d/abc/view',
+        'https:\\\\drive.google.com\\file\\d\\abc\\view',
+        'https://drive.google.com\\file/d/abc/view',
+        ' https://drive.google.com/file/d/abc/view',
+        'https://drive.google.com/file/d/abc/view ',
         'https://drive.google.com.evil.test/file/d/abc',
         'https://evil.test/?u=https://drive.google.com/',
         'https://user@evil.test:443@drive.google.com.evil.test/',

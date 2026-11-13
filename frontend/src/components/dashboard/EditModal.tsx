@@ -6,6 +6,7 @@ import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { localIsoDate } from '../../utils/localIsoDate';
 import { formatBytes } from '../../utils/fileSize';
 import { ctaProblem, providerName } from '../../utils/media';
+import { destinationProblem } from '../../utils/destination';
 import { SECURE_VIEW_NOT_ELIGIBLE } from '../../utils/secureView';
 import MediaCtaFields from './MediaCtaFields';
 import SecureViewSwitch from './SecureViewSwitch';
@@ -214,9 +215,18 @@ export default function EditModal({
             }
         }
 
+        // Only a destination that was edited: an older link may still hold an
+        // address without its slashes, and saving its title must not be refused.
+        const destinationChanged = !fixedDestination && url !== link.original_url;
+        const badDestination = destinationChanged ? destinationProblem(url) : null;
+        if (badDestination) {
+            setSaveError(badDestination);
+            return;
+        }
+
         setSaving(true);
         const payload: LinkUpdatePayload = {
-            original_url: !fixedDestination && url !== link.original_url ? url : undefined,
+            original_url: destinationChanged ? url : undefined,
             password: password || undefined,
             remove_password: removePassword || undefined,
             remove_expiration: shouldRemoveExpiration || undefined,

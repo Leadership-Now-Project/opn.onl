@@ -101,8 +101,15 @@ impl DriveFileRef {
 }
 
 /// Whether `url` is an address Google Drive shows a file at: `https` on
-/// `docs.google.com` or `drive.google.com`, on the default port.
+/// `docs.google.com` or `drive.google.com`, on the default port, written out
+/// in full. `https:drive.google.com/…` parses to the same host but is not an
+/// address Drive hands out, and a browser would not open Drive with it.
+///
+/// Twin: `isDriveLinkUrl` in `frontend/src/utils/googleDrive.ts`.
 pub fn is_drive_url(url: &str) -> bool {
+    if !crate::utils::url_policy::is_written_out_http_url(url) {
+        return false;
+    }
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
@@ -178,6 +185,30 @@ mod tests {
         assert!(!is_drive_url("https://drive.google.com:8443/file/d/abc"));
         assert!(!is_drive_url("https://sites.google.com/view/abc"));
         assert!(!is_drive_url("opn-file:12"));
+    }
+
+    /// The parser reads each of these as `https://drive.google.com/…`; none is
+    /// an address Drive hands out, and a browser would not open Drive with
+    /// the first two.
+    #[test]
+    fn a_drive_address_that_is_not_written_out_is_not_a_drive_url() {
+        for url in [
+            "https:drive.google.com/file/d/abc/view",
+            "https:/drive.google.com/file/d/abc/view",
+            "https:///drive.google.com/file/d/abc/view",
+            "https:\\\\drive.google.com\\file\\d\\abc\\view",
+            "https://drive.google.com\\file/d/abc/view",
+            " https://drive.google.com/file/d/abc/view",
+            "https://drive.google.com/file/d/abc/view ",
+        ] {
+            assert!(
+                url::Url::parse(url)
+                    .is_ok_and(|parsed| parsed.host_str() == Some("drive.google.com")),
+                "{url:?} is one the parser accepts"
+            );
+            assert!(!is_drive_url(url), "{url:?}");
+        }
+        assert!(is_drive_url("HTTPS://drive.google.com/file/d/abc/view"));
     }
 
     fn file(file_id: &str, name: &str, mime_type: &str) -> DriveFileRef {

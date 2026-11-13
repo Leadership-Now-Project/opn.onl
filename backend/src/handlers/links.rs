@@ -349,8 +349,34 @@ fn check_link_text(title: Option<&str>, notes: Option<&str>) -> Result<(), Strin
     Ok(())
 }
 
-/// Validate URL is http/https only and sanitize if enabled
+/// Check a destination and return the spelling to STORE, which is not always
+/// the text that was typed.
+///
+/// An address written out the ordinary way (`http://` or `https://`, then the
+/// host) comes back exactly as typed. Anything else the parser still reads as
+/// an http(s) address (`https:host/x`, `https:/host/x`, `https:\\host\x`,
+/// `https:///host/x`, a leading space) comes back in the parser's spelling,
+/// `https://host/x`: a browser sent the typed text in `Location` would open a
+/// path on the short-link host instead. See
+/// `url_policy::well_formed_destination`.
+///
+/// Every check runs on the typed text and, when it differs, again on what
+/// will be stored. A caller that keeps a destination must keep the returned
+/// value, and compare destinations with `url_policy::same_destination`, never
+/// as text.
 pub(crate) fn validate_url(url: &str) -> Result<String, String> {
+    check_destination_text(url)?;
+    match crate::utils::url_policy::well_formed_destination(url) {
+        std::borrow::Cow::Borrowed(_) => Ok(url.to_string()),
+        std::borrow::Cow::Owned(stored) => {
+            check_destination_text(&stored)?;
+            Ok(stored)
+        }
+    }
+}
+
+/// Every rule a destination must pass, applied to one spelling of it.
+fn check_destination_text(url: &str) -> Result<(), String> {
     // Raw CR/LF (and other controls) survive `Url::parse` and then break the
     // redirect response, so one visit can be retried into several clicks.
     if url.chars().any(|c| c.is_ascii_control()) {
@@ -436,7 +462,7 @@ pub(crate) fn validate_url(url: &str) -> Result<String, String> {
     // ENABLE_URL_SANITIZATION so they can't be disabled as a side effect.
     check_url_content_policy(url)?;
 
-    Ok(url.to_string())
+    Ok(())
 }
 
 // ============= SSRF guard =============
@@ -1159,6 +1185,11 @@ mod reserved_alias_tests {
 
 #[derive(Deserialize, Validate, ToSchema)]
 pub struct CreateLinkRequest {
+    /// The destination: an `http://` or `https://` address. Written out like
+    /// that, it is stored exactly as sent. An address the URL parser still
+    /// understands without its two slashes (`https:example.com/page`,
+    /// `https:/example.com/page`, backslashes for slashes) is stored, and
+    /// redirected to, as `https://example.com/page`.
     #[serde(default)]
     pub original_url: String,
     pub custom_alias: Option<String>,
@@ -1211,6 +1242,9 @@ pub struct MediaCtaRequest {
 
 #[derive(Deserialize, Validate, ToSchema)]
 pub struct UpdateLinkRequest {
+    /// A new destination, spelled and stored as on create. The address the
+    /// link already has, in any spelling, is not a change: the stored text
+    /// stays as it is.
     pub original_url: Option<String>,
     /// An empty string clears the title.
     pub title: Option<String>,
@@ -1259,6 +1293,8 @@ pub struct UpdateLinkRequest {
 
 #[derive(Deserialize, ToSchema)]
 pub struct BulkCreateLinkRequest {
+    /// Destinations, spelled and stored as `original_url` is on create. A
+    /// failure is reported under the text that was sent.
     pub urls: Vec<String>,
     pub folder_id: Option<i32>,
     pub org_id: Option<i32>,
@@ -2373,8 +2409,14 @@ fn frontend_interstitial_redirect(code: &str, unlock: Option<&str>) -> axum::res
 
 /// Redirect to a destination without leaking a short-lived unlock query in the
 /// next request's Referer header.
+///
+/// Every redirect to a link's or a rule's destination ends here, from the
+/// cache and from the database alike, so this is where a row stored before
+/// `validate_url` kept the parser's spelling is put right: `https:host/x` is
+/// sent as `https://host/x`. The row and the cache entry keep their text.
 fn destination_redirect(url: &str) -> axum::response::Response {
-    let mut response = Redirect::temporary(url).into_response();
+    let url = crate::utils::url_policy::well_formed_destination(url);
+    let mut response = Redirect::temporary(&url).into_response();
     response.headers_mut().insert(
         axum::http::header::REFERRER_POLICY,
         axum::http::HeaderValue::from_static("no-referrer"),
@@ -3680,6 +3722,9 @@ pub async fn preview_link(
 
             let (shown_url, shown_domain) = match destination {
                 Some(url) => {
+                    // The page puts this in an anchor: the same spelling
+                    // `destination_redirect` sends, for an older row.
+                    let url = crate::utils::url_policy::well_formed_destination(&url).into_owned();
                     let domain = url::Url::parse(&url)
                         .map(|u| u.host_str().unwrap_or("unknown").to_string())
                         .unwrap_or_else(|_| "unknown".to_string());
@@ -5334,6 +5379,7 @@ pub struct RoutingRuleInput {
     pub match_country: Option<String>,
     /// Primary language code such as en. Blank matches any.
     pub match_lang: Option<String>,
+    /// Checked, spelled and stored as a link's `original_url` is.
     pub destination_url: String,
     /// 1-1000, default 1. Relative share among rules with the same priority.
     pub weight: Option<i32>,
@@ -6273,8 +6319,15 @@ pub async fn update_link(
             return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
         }
         // A new destination is no longer the Drive file the link was made for.
-        destination_changed = validated_url != link.original_url;
-        active_link.original_url = Set(validated_url);
+        // The same address in another spelling is not a new destination (an
+        // older row may hold `https:host/x`, which comes back from
+        // `validate_url` as `https://host/x`): the row keeps its text, and
+        // with it its Drive file, its media page and its cache entry.
+        destination_changed =
+            !crate::utils::url_policy::same_destination(&validated_url, &link.original_url);
+        if destination_changed {
+            active_link.original_url = Set(validated_url);
+        }
     }
 
     // The button under a media link's player. Checked before anything is
@@ -6891,11 +6944,17 @@ pub async fn bulk_create_links(
         // Validate URL before creating link. Surface the specific reason
         // (bad format, dangerous file type, raw IP, …) rather than a generic
         // message, so a bulk upload tells the user which links were rejected why.
-        if let Err(e) = validate_url(&url) {
-            record_bulk_failure(&mut errors, &mut failed, &url, format!("{}: {}", url, e));
-            continue;
-        }
-        if destination_host(&url).is_some_and(|host| private_hosts.contains(&host)) {
+        // `url` stays the text that was sent: a failure is reported under it,
+        // which is how the import box finds the line again. `destination` is
+        // what is checked from here on and stored.
+        let destination = match validate_url(&url) {
+            Ok(destination) => destination,
+            Err(e) => {
+                record_bulk_failure(&mut errors, &mut failed, &url, format!("{}: {}", url, e));
+                continue;
+            }
+        };
+        if destination_host(&destination).is_some_and(|host| private_hosts.contains(&host)) {
             record_bulk_failure(
                 &mut errors,
                 &mut failed,
@@ -6906,7 +6965,7 @@ pub async fn bulk_create_links(
         }
 
         // Check if URL or domain is blocked
-        if let Err(e) = check_blocked(&state.db, &url).await {
+        if let Err(e) = check_blocked(&state.db, &destination).await {
             record_bulk_failure(&mut errors, &mut failed, &url, format!("{}: {}", url, e));
             continue;
         }
@@ -6988,7 +7047,7 @@ pub async fn bulk_create_links(
             }
 
             let link = links::ActiveModel {
-                original_url: Set(url.clone()),
+                original_url: Set(destination.clone()),
                 code: Set(code.clone()),
                 user_id: Set(user_id),
                 folder_id: Set(payload.folder_id),
@@ -7597,10 +7656,15 @@ pub async fn clone_link(
 
     // Re-check the destination. A link stored before this rule, or written
     // straight into the database, must not be cloned into a fresh code.
-    if let Err(e) = validate_url(&link.original_url) {
-        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
-    }
-    if let Err(e) = ensure_public_destination(&link.original_url).await {
+    // The copy stores what `validate_url` returns: an older row holding
+    // `https:host/x` is cloned as `https://host/x`.
+    let clone_destination = match validate_url(&link.original_url) {
+        Ok(destination) => destination,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
+        }
+    };
+    if let Err(e) = ensure_public_destination(&clone_destination).await {
         return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
     }
 
@@ -7670,7 +7734,7 @@ pub async fn clone_link(
 
     // Create new link with same settings but new code
     let new_link = links::ActiveModel {
-        original_url: Set(link.original_url.clone()),
+        original_url: Set(clone_destination.clone()),
         code: Set(code.clone()),
         user_id: Set(Some(user_id)),
         expires_at: Set(link.expires_at),
@@ -7834,7 +7898,7 @@ pub async fn clone_link(
             id: new_id,
             code: code.clone(),
             short_url: format!("{}/{}", base_url, code),
-            original_url: link.original_url,
+            original_url: clone_destination,
             message: "Link cloned successfully".to_string(),
         }),
     )

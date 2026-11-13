@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { API_ENDPOINTS, SessionExpiredError, authFetch, responseError } from '../../config/api';
 import logger from '../../utils/logger';
 import { savePendingUrl } from '../../utils/pendingUrl';
+import { destinationProblem } from '../../utils/destination';
 import { localIsoDate } from '../../utils/localIsoDate';
 import type { AppSettings } from './types';
 import { swatchColor, type CatalogItem } from './linkScope';
@@ -112,6 +113,15 @@ export default function CreateLinkForm({
         const badAlias = aliasProblem(alias, appSettings);
         if (badAlias) {
             onError(badAlias);
+            setCreating(false);
+            return;
+        }
+
+        // `https:example.com` is nearly always a slip. The server would store
+        // it as `https://example.com/`; here the person is asked to look again.
+        const badDestination = destinationProblem(newUrl);
+        if (badDestination) {
+            onError(badDestination);
             setCreating(false);
             return;
         }

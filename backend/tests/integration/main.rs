@@ -46,6 +46,7 @@ mod click_cap_race_tests;
 mod click_flush_batch_tests;
 mod data_lifecycle_tests;
 mod dead_link_page_tests;
+mod destination_spelling_tests;
 mod domain_abuse_hardening_tests;
 mod drive_link_tests;
 mod email_case_folding_tests;

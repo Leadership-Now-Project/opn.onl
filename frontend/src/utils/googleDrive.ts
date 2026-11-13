@@ -7,6 +7,7 @@
 // https://developers.google.com/identity/oauth2/web/guides/use-token-model
 // https://developers.google.com/workspace/drive/picker/guides/web-picker
 
+import { isWrittenOutHttpUrl } from './destination';
 import { cachedDriveToken, forgetDriveToken, rememberDriveToken } from './driveToken';
 
 export { forgetDriveToken };
@@ -365,10 +366,14 @@ const DRIVE_LINK_HOSTS = ['docs.google.com', 'drive.google.com'];
 // Unicode's Cc, which is what Rust's `char::is_control` tests.
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
-/** `https` on docs.google.com or drive.google.com, on the default port. */
+/**
+ * `https` on docs.google.com or drive.google.com, on the default port, written
+ * out in full: `https:drive.google.com/…` parses to the same host and is not a
+ * Drive address. Twin of `is_drive_url` in `backend/src/utils/drive.rs`.
+ */
 export function isDriveLinkUrl(url: string): boolean {
     // The browser's URL parser drops tabs and line breaks; our server refuses them.
-    if (/\p{Cc}/u.test(url)) return false;
+    if (/\p{Cc}/u.test(url) || !isWrittenOutHttpUrl(url)) return false;
     let parsed: URL;
     try {
         parsed = new URL(url);

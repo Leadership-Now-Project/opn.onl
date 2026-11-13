@@ -1428,6 +1428,44 @@ async fn deleting_your_own_account_removes_your_files() {
 
 // ------------------------------------------------------------ editing
 
+/// Saving a file link's other fields, with or without the empty destination
+/// the API shows for it, leaves it the file link it was (PZAIAP-40: the
+/// "same destination" comparison must not take a file's marker for a change).
+#[tokio::test]
+async fn a_file_link_saved_without_a_destination_keeps_its_file() {
+    let bucket = Bucket::new().await;
+    let alice = person(&bucket.db).await;
+    let (link, key) = bucket
+        .shared(&alice, "a.pdf", "application/pdf", 10, json!({}))
+        .await;
+    let id = link["id"].as_i64().unwrap();
+    let marker = link_row(&bucket.db, id).await.original_url;
+    let file_id = file_row(&bucket.db, &key).await.id;
+    assert_eq!(marker, links::file_link_marker(file_id));
+
+    for body in [
+        json!({"title": "Only the title"}),
+        json!({"title": "The destination as shown", "original_url": ""}),
+    ] {
+        let res = bucket
+            .app()
+            .await
+            .put(&format!("/links/{id}"))
+            .authorization_bearer(&alice.token)
+            .json(&body)
+            .await;
+        assert_eq!(res.status_code(), 200, "{body}: {}", res.text());
+        assert_eq!(res.json::<Value>()["file"]["filename"], "a.pdf");
+        let row = link_row(&bucket.db, id).await;
+        assert_eq!(row.original_url, marker, "after {body}");
+        assert_eq!(row.title.as_deref(), body["title"].as_str());
+        assert!(file_row(&bucket.db, &key).await.deleted_at.is_none());
+        assert!(bucket.store.contains(&key));
+    }
+    let res = bucket.app().await.get(&format!("/{}", code(&link))).await;
+    assert_eq!(res.status_code(), 302, "still served: {}", res.text());
+}
+
 #[tokio::test]
 async fn a_file_link_cannot_be_pointed_at_a_url_cloned_or_routed() {
     let bucket = Bucket::new().await;
