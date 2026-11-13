@@ -23,6 +23,7 @@ mod default_org_tests;
 mod deleted_link_purge_task_tests;
 mod deleted_link_purge_tests;
 mod env_switch_tests;
+mod file_sweep_tests;
 mod handler_rate_limit_tests;
 mod https_redirect_tests;
 mod left_org_link_cap_tests;

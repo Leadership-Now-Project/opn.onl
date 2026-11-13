@@ -4,6 +4,7 @@ import { X, Flame, ShieldCheck, Route, ChevronDown, LayoutList, MousePointer, Ca
 import { API_ENDPOINTS, authFetch, failureMessage, responseError } from '../../config/api';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { localIsoDate } from '../../utils/localIsoDate';
+import { formatBytes } from '../../utils/fileSize';
 import type { LinkData, LinkUpdatePayload, RoutingRule } from './types';
 import { swatchColor, type CatalogItem } from './linkScope';
 import RoutingRulesEditor from './RoutingRulesEditor';
@@ -58,6 +59,9 @@ export default function EditModal({
     folders = [],
     tags = [],
 }: EditModalProps) {
+    // A file link serves its uploaded file: there is no destination to edit
+    // and no routing rules to give it.
+    const isFile = Boolean(link.file);
     const [url, setUrl] = useState(link.original_url);
     const [title, setTitle] = useState(link.title ?? '');
     const [notes, setNotes] = useState(link.notes ?? '');
@@ -100,7 +104,7 @@ export default function EditModal({
     useFocusTrap(dialogRef);
 
     useEffect(() => {
-        if (!routingEnabled) return;
+        if (!routingEnabled || isFile) return;
         let cancelled = false;
         (async () => {
             try {
@@ -121,7 +125,7 @@ export default function EditModal({
             }
         })();
         return () => { cancelled = true; };
-    }, [routingEnabled, link.id, rulesAttempt]);
+    }, [routingEnabled, isFile, link.id, rulesAttempt]);
 
     const retryRulesLoad = () => {
         setRulesSessionMessage('');
@@ -185,7 +189,7 @@ export default function EditModal({
 
         setSaving(true);
         const payload: LinkUpdatePayload = {
-            original_url: url !== link.original_url ? url : undefined,
+            original_url: !isFile && url !== link.original_url ? url : undefined,
             password: password || undefined,
             remove_password: removePassword || undefined,
             remove_expiration: shouldRemoveExpiration || undefined,
@@ -230,7 +234,7 @@ export default function EditModal({
             }
 
             const rules = routingRules.filter(r => r.destination_url.trim());
-            if (routingEnabled && rulesLoad === 'loaded' && rulesSignature(rules) !== loadedSignature) {
+            if (routingEnabled && !isFile && rulesLoad === 'loaded' && rulesSignature(rules) !== loadedSignature) {
                 const response = await authFetch(API_ENDPOINTS.linkRules(link.id), {
                     method: 'PUT',
                     body: JSON.stringify({ rules: rulesPayload(rules) }),
@@ -286,7 +290,16 @@ export default function EditModal({
                         </div>
                     </div>
 
-                    <div>
+                    {link.file && (
+                        <div>
+                            <p className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">File</p>
+                            <div className="rounded-lg border border-line bg-paper px-4 py-2 text-sm text-ink">
+                                {link.file.filename} <span className="text-faint">({formatBytes(link.file.size_bytes)})</span>
+                            </div>
+                        </div>
+                    )}
+
+                    <div hidden={isFile}>
                         <label htmlFor="edit-url" className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">Destination URL</label>
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
                             <input
@@ -561,7 +574,7 @@ export default function EditModal({
                         </label>
                     )}
 
-                    {routingEnabled && (
+                    {routingEnabled && !isFile && (
                         <div className="border-t border-line pt-4">
                             <button
                                 type="button"

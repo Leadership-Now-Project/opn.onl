@@ -926,6 +926,15 @@ pub async fn delete_organization(
         return Err(error);
     }
 
+    // Noted before the purge: once the link rows are gone, their files can no
+    // longer be found by link.
+    let files = crate::utils::files::FilesOfLinks::find(
+        &state,
+        &state.db,
+        sea_orm::Condition::all().add(links::Column::OrgId.eq(org_id)),
+    )
+    .await;
+
     purge_organization(&txn, org_id).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -939,6 +948,8 @@ pub async fn delete_organization(
             Json(serde_json::json!({"error": "Failed to delete organization"})),
         )
     })?;
+
+    files.remove(&state).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

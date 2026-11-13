@@ -209,13 +209,17 @@ async fn links_to_list(
 }
 
 /// How a link appears in the reminder: its title, or its destination when it
-/// has none.
+/// has none. A file link has no destination to name.
 fn expiring_link(link: &links::Model) -> Option<ExpiringLink> {
     let label = link
         .title
         .as_deref()
         .filter(|title| !title.trim().is_empty())
-        .unwrap_or(&link.original_url);
+        .unwrap_or(if link.is_file() {
+            "Shared file"
+        } else {
+            &link.original_url
+        });
     Some(ExpiringLink {
         code: link.code.clone(),
         label: label.to_string(),

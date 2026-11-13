@@ -1649,6 +1649,12 @@ pub async fn delete_account(
 
         crate::handlers::links::invalidate_cached_codes(&state, &cached_codes).await;
 
+        // The files of the links that just went down go with them.
+        crate::utils::files::FilesOfLinks::of_account(&state, user_id)
+            .await
+            .remove(&state)
+            .await;
+
         // After the commit, so the request transaction is only the delete.
         // A failure here still returns 200: the account is gone, and the daily
         // retention task scrubs personal-link click PII of deleted users.
@@ -1721,6 +1727,18 @@ pub struct AppSettingsResponse {
     /// configured and exists; the dashboard then lists its links.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_org: Option<DefaultOrgInfo>,
+    /// File sharing. Present only when the instance has a bucket for uploaded
+    /// files (`FILES_S3_BUCKET`); the dashboard's Files tab then offers upload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<FileSharingInfo>,
+}
+
+/// What a client needs to know about file sharing before it uploads.
+#[derive(Serialize, ToSchema)]
+pub struct FileSharingInfo {
+    pub enabled: bool,
+    /// The largest file accepted, in bytes (`FILES_MAX_BYTES`).
+    pub max_bytes: u64,
 }
 
 /// Get app settings
@@ -1807,6 +1825,10 @@ pub async fn get_app_settings(State(state): State<AppState>) -> impl IntoRespons
             require_email_verification,
             email_configured,
             link_expiry_reminders_enabled,
+            files: state.files.as_ref().map(|files| FileSharingInfo {
+                enabled: true,
+                max_bytes: files.max_bytes,
+            }),
             google_client_id: crate::handlers::google_auth::configured_client_id(),
             default_org: crate::handlers::default_org::settings_info(&state.db).await,
         }),

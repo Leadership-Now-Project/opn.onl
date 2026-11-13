@@ -75,6 +75,35 @@ RUN set -e; \
     fi; \
     echo "CSP Google sign-in sources: '${G_SCRIPT}'"
 
+# File sharing (the dashboard's Files tab) uploads straight from the browser to
+# the storage bucket, so the page's connect-src must name the bucket's origin,
+# e.g. https://my-bucket.s3.us-east-2.amazonaws.com. Only a dashboard image for
+# a deployment with file sharing sets CSP_FILES_UPLOAD_ORIGIN; without it the
+# placeholder becomes nothing and the policy is exactly the stock one. The
+# value is written into a header, so anything but a bare https origin is
+# refused: a space or a semicolon in it would add sources or whole directives.
+ARG CSP_FILES_UPLOAD_ORIGIN
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    if ! grep -q '__CSP_FILES_CONNECT__' "$CONF"; then \
+        echo "ERROR: __CSP_FILES_CONNECT__ placeholder not found in nginx.conf"; \
+        exit 1; \
+    fi; \
+    if [ -z "$CSP_FILES_UPLOAD_ORIGIN" ]; then \
+        F_CONNECT=""; \
+    elif printf '%s' "$CSP_FILES_UPLOAD_ORIGIN" | grep -Eq '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$'; then \
+        F_CONNECT=" $CSP_FILES_UPLOAD_ORIGIN"; \
+    else \
+        echo "ERROR: CSP_FILES_UPLOAD_ORIGIN must be an https origin such as https://bucket.s3.us-east-2.amazonaws.com, not '$CSP_FILES_UPLOAD_ORIGIN'"; \
+        exit 1; \
+    fi; \
+    sed -i "s#__CSP_FILES_CONNECT__#${F_CONNECT}#g" "$CONF"; \
+    if grep -q '__CSP_FILES_' "$CONF"; then \
+        echo "ERROR: a __CSP_FILES_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP file upload origin: '${F_CONNECT}'"
+
 # Build stage - use full Node image for Puppeteer/Chromium support
 FROM node:22-slim AS builder
 

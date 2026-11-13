@@ -23,6 +23,7 @@ import { parseBulkUrls, readBulkErrors } from '../components/dashboard/bulkImpor
 import Skeleton from '../components/dashboard/Skeleton';
 import CreateLinkForm from '../components/dashboard/CreateLinkForm';
 import CreateCard, { type CreateTab } from '../components/dashboard/CreateCard';
+import CreateFilesTab from '../components/dashboard/CreateFilesTab';
 import LinkFilters from '../components/dashboard/LinkFilters';
 import LinkRow from '../components/dashboard/LinkRow';
 import LinkViewToggle from '../components/dashboard/LinkViewToggle';
@@ -299,6 +300,7 @@ export default function Dashboard() {
             result = result.filter(link =>
                 link.code.toLowerCase().includes(query) ||
                 link.original_url.toLowerCase().includes(query) ||
+                link.file?.filename.toLowerCase().includes(query) ||
                 link.title?.toLowerCase().includes(query) ||
                 link.notes?.toLowerCase().includes(query) ||
                 link.tags.some(t => t.name.toLowerCase().includes(query))
@@ -1093,7 +1095,19 @@ export default function Dashboard() {
                     You can view the links in {activeOrgName}. Editors and admins can add and change them.
                 </p>
             ) : (
-                <CreateCard tab={createTab} onTabChange={setCreateTab}>
+                <CreateCard
+                    tab={createTab}
+                    onTabChange={setCreateTab}
+                    files={
+                        <CreateFilesTab
+                            appSettings={appSettings}
+                            active={createTab === 'files'}
+                            onCreated={() => { fetchLinks(); }}
+                            orgId={orgId}
+                            orgName={activeOrgName}
+                        />
+                    }
+                >
                     <CreateLinkForm
                         appSettings={appSettings}
                         initialUrl={createInitialUrl}

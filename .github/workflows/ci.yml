@@ -367,6 +367,22 @@ jobs:
           printf '%s\n' "$headers" | grep -iF "; style-src 'self' 'unsafe-inline'; img-src"
           printf '%s\n' "$headers" | grep -iF "https://cloudflareinsights.com; frame-ancestors 'self';"
 
+          # The same for the file upload origin: a build arg only a dashboard
+          # image with file sharing sets. A stock build keeps no placeholder
+          # and names no storage host.
+          if printf '%s\n' "$headers" | grep -Fq '__CSP_FILES_'; then
+            echo "a stock build's headers still carry a __CSP_FILES_ placeholder"
+            exit 1
+          fi
+          if docker exec "$container_id" grep -Rq '__CSP_FILES_' /etc/nginx/conf.d; then
+            echo "a stock build's nginx config still carries a __CSP_FILES_ placeholder"
+            exit 1
+          fi
+          if docker exec "$container_id" grep -Rq 'amazonaws.com' /etc/nginx/conf.d; then
+            echo "a stock build's nginx config names a storage host"
+            exit 1
+          fi
+
       - name: Verify the Google sign-in CSP build arg
         run: |
           docker build \
@@ -420,6 +436,63 @@ jobs:
             exit 1
           fi
           ! grep -R "fonts.googleapis.com" frontend/src
+
+      - name: Verify the file upload CSP build arg
+        run: |
+          # The LNP dashboard image: Google sign-in and file sharing together.
+          docker build \
+            --file frontend/Dockerfile \
+            --target csp-config \
+            --build-arg VITE_API_URL=https://api.smoke.test \
+            --build-arg CSP_GOOGLE_SIGN_IN=true \
+            --build-arg CSP_FILES_UPLOAD_ORIGIN=https://files-smoke.s3.us-east-2.amazonaws.com \
+            --tag opn-frontend-csp-files-smoke \
+            frontend
+          container_id=$(docker run --detach --publish 127.0.0.1:8083:80 opn-frontend-csp-files-smoke)
+          trap 'docker rm --force "$container_id"' EXIT
+          docker exec "$container_id" sh -c '
+            mkdir -p /usr/share/nginx/html/assets
+            printf "ok\n" > /usr/share/nginx/html/assets/app-deadbeef.js
+            printf "ok\n" > /usr/share/nginx/html/robots.txt
+          '
+          for attempt in $(seq 1 20); do
+            if headers=$(curl --fail --silent --show-error --head http://127.0.0.1:8083/); then
+              break
+            fi
+            sleep 1
+          done
+          test -n "${headers:-}"
+
+          # All three copies of the policy (HTML, /assets/, public files) must
+          # allow the upload origin, and only in connect-src.
+          for path in / /assets/app-deadbeef.js /robots.txt; do
+            files_headers=$(curl --fail --silent --show-error --head "http://127.0.0.1:8083${path}")
+            printf '%s\n' "$files_headers" | grep -iF "connect-src 'self' https://api.smoke.test wss://api.smoke.test https://www.google-analytics.com https://region1.google-analytics.com https://www.google.com https://cloudflareinsights.com https://accounts.google.com/gsi/ https://files-smoke.s3.us-east-2.amazonaws.com; frame-src"
+            test "$(printf '%s\n' "$files_headers" | grep -io 'files-smoke.s3.us-east-2.amazonaws.com' | wc -l)" -eq 1
+            if printf '%s\n' "$files_headers" | grep -Fq '__CSP_FILES_'; then
+              echo "the headers for ${path} still carry a __CSP_FILES_ placeholder"
+              exit 1
+            fi
+          done
+          if docker exec "$container_id" grep -Rq '__CSP_FILES_' /etc/nginx/conf.d; then
+            echo "the file sharing nginx config still carries a __CSP_FILES_ placeholder"
+            exit 1
+          fi
+
+          # The value goes into a header. Anything but a bare https origin
+          # could add sources or directives to the policy, so it must not build.
+          for bad in \
+              "http://files-smoke.s3.us-east-2.amazonaws.com" \
+              "https://files-smoke.s3.us-east-2.amazonaws.com/path" \
+              "https://a.example https://b.example" \
+              "https://a.example; script-src *" \
+              "*"; do
+            if docker build --file frontend/Dockerfile --target csp-config \
+                --build-arg "CSP_FILES_UPLOAD_ORIGIN=${bad}" --tag opn-frontend-csp-files-typo frontend; then
+              echo "CSP_FILES_UPLOAD_ORIGIN='${bad}' built an image"
+              exit 1
+            fi
+          done
 
   e2e:
     name: E2E (Playwright, Chromium)

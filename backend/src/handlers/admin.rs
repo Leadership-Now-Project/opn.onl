@@ -688,6 +688,12 @@ pub async fn delete_user(
 
     crate::handlers::links::invalidate_cached_codes(&state, &cached_codes).await;
 
+    // The files of the links that just went down go with them.
+    crate::utils::files::FilesOfLinks::of_account(&state, user_id)
+        .await
+        .remove(&state)
+        .await;
+
     // After the commit, so this request does not rewrite every click of the
     // account inside the delete transaction. The daily retention task retries
     // personal-link click PII of deleted users if this pass does not finish.
@@ -884,6 +890,10 @@ pub async fn hard_delete_user(
         }
     };
 
+    // Noted before the delete: once the link rows are gone, their files can
+    // no longer be found by link.
+    let files = crate::utils::files::FilesOfLinks::of_account(&state, user_id).await;
+
     match hard_delete_user_in(&state.db, &txn, user_id).await {
         Ok(()) => {
             if txn.commit().await.is_err() {
@@ -896,6 +906,7 @@ pub async fn hard_delete_user(
                 )
                     .into_response();
             }
+            files.remove(&state).await;
             (
                 StatusCode::OK,
                 Json(AdminResponse {
@@ -3167,6 +3178,12 @@ pub async fn admin_delete_link(
         let _ = cache.invalidate_link(&code).await;
     }
 
+    // A file link's file is removed with it.
+    crate::utils::files::FilesOfLinks::of_links(&state, &[link_id])
+        .await
+        .remove(&state)
+        .await;
+
     (
         StatusCode::OK,
         Json(AdminResponse {
@@ -3337,6 +3354,11 @@ pub async fn admin_bulk_delete_links(
                     let _ = cache.invalidate_link(code).await;
                 }
             }
+            // The files of the deleted links are removed with them.
+            crate::utils::files::FilesOfLinks::of_links(&state, &payload.ids)
+                .await
+                .remove(&state)
+                .await;
             (
                 StatusCode::OK,
                 Json(BulkLinkActionResponse {

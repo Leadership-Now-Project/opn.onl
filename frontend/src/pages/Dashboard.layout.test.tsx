@@ -48,7 +48,7 @@ describe('Dashboard layout', () => {
     }
   });
 
-  it('shows the Files placeholder and hides the form on the Files tab', async () => {
+  it('shows the Files tab and hides the form on the Files tab', async () => {
     const { user } = await ready();
 
     await user.click(screen.getByRole('tab', { name: 'Files' }));
@@ -57,10 +57,8 @@ describe('Dashboard layout', () => {
     expect(screen.getByRole('tab', { name: 'Links' })).toHaveAttribute('aria-selected', 'false');
     const panel = screen.getByRole('tabpanel');
     expect(panel).toHaveAccessibleName('Files');
-    expect(within(panel).getByText('Coming soon.')).toBeVisible();
-    expect(
-      within(panel).getByText('Share a file from Google Drive, OneDrive or your computer.'),
-    ).toBeVisible();
+    // These settings name no file storage, as on a server without a bucket.
+    expect(within(panel).getByText('File sharing is not set up on this server.')).toBeVisible();
     expect(screen.getByPlaceholderText(/example.com/i)).not.toBeVisible();
     expect(screen.queryByRole('button', { name: 'Create' })).not.toBeInTheDocument();
   });

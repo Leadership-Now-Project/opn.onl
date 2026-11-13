@@ -20,7 +20,9 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::AppState;
-use crate::entity::{blocked_domains, blocked_links, click_events, link_tags, links, tags, users};
+use crate::entity::{
+    blocked_domains, blocked_links, click_events, link_files, link_tags, links, tags, users,
+};
 use crate::handlers::link_access::{
     CallerAccess, LinkAction, count_own_live_links, created_by, listed_links, live_link_for,
     readable_links,
@@ -161,6 +163,7 @@ async fn cached_link_is_still_plain(
     };
 
     if !current.is_active()
+        || current.is_file()
         || current.original_url != cached.original_url
         || current.password_hash.is_some()
         || current.max_clicks.is_some()
@@ -672,6 +675,10 @@ const RESERVED_ALIASES: &[&str] = &[
     // `POST /report` lands in the same release. An alias would then answer
     // 405 instead of redirecting.
     "report",
+    // The file sharing API is `/files/uploads` and `/files/usage`. A link
+    // that already has this code keeps redirecting: `GET /files` is no route
+    // of that API.
+    "files",
     "ws",
     "sse",
     "api",
@@ -1242,6 +1249,65 @@ pub struct LinkResponse {
     /// `org_id`: an editor may change a colleague's link but not delete it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_delete: Option<bool>,
+    /// The uploaded file this link serves. Only on a file link, whose
+    /// `original_url` is empty: there is no destination to show, and the
+    /// address a visitor is sent to is signed per visit and never listed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<LinkFileInfo>,
+}
+
+/// What a link list shows of an uploaded file. Never where it is stored.
+#[derive(Serialize, ToSchema, Clone, Debug, PartialEq)]
+pub struct LinkFileInfo {
+    pub filename: String,
+    pub size_bytes: i64,
+    /// The type the uploader's browser gave the file.
+    pub content_type: String,
+}
+
+impl LinkFileInfo {
+    pub(crate) fn of(file: &link_files::Model) -> Self {
+        Self {
+            filename: file.filename.clone(),
+            size_bytes: file.size_bytes,
+            content_type: file.content_type.clone(),
+        }
+    }
+}
+
+/// Fill in `file` on the responses whose link serves an uploaded file. One
+/// query for the page, and none at all when no link on it is a file link.
+pub(crate) async fn attach_file_info<'a, C: ConnectionTrait>(
+    db: &C,
+    rows: impl IntoIterator<Item = &'a links::Model>,
+    responses: &mut [LinkResponse],
+) -> Result<(), DbErr> {
+    let file_link_ids: Vec<i32> = rows
+        .into_iter()
+        .filter(|link| link.is_file())
+        .map(|link| link.id)
+        .collect();
+    if file_link_ids.is_empty() {
+        return Ok(());
+    }
+    let mut by_link: HashMap<i32, LinkFileInfo> = HashMap::new();
+    for chunk in file_link_ids.chunks(TAG_LOOKUP_CHUNK) {
+        let files = link_files::Entity::find()
+            .filter(link_files::Column::LinkId.is_in(chunk.to_vec()))
+            .all(db)
+            .await?;
+        for file in files {
+            if let Some(link_id) = file.link_id {
+                by_link.insert(link_id, LinkFileInfo::of(&file));
+            }
+        }
+    }
+    for response in responses {
+        if let Some(info) = by_link.remove(&response.id) {
+            response.file = Some(info);
+        }
+    }
+    Ok(())
 }
 
 impl LinkResponse {
@@ -1255,7 +1321,7 @@ impl LinkResponse {
             code: l.code.clone(),
             short_url: format!("{}/{}", base_url, l.code),
             api_url: format!("{}/{}", api_url, l.code),
-            original_url: l.original_url.clone(),
+            original_url: l.shown_url().to_string(),
             title: l.title.clone(),
             click_count: l.click_count,
             created_at: utc_rfc3339(l.created_at),
@@ -1277,6 +1343,7 @@ impl LinkResponse {
             tags,
             created_by: None,
             can_delete: None,
+            file: None,
         }
     }
 }
@@ -1964,6 +2031,130 @@ fn destination_redirect(url: &str) -> axum::response::Response {
     response
 }
 
+/// Redirect a visitor to the signed address of an uploaded file. That address
+/// works for a few minutes for whoever holds it, so nothing may keep it: not a
+/// cache (`no-store`), and not the next site's logs (`no-referrer`).
+fn file_redirect(url: &str) -> axum::response::Response {
+    use axum::http::{HeaderValue, header};
+
+    let Ok(location) = HeaderValue::from_str(url) else {
+        return link_state_unavailable().into_response();
+    };
+    let mut response = StatusCode::FOUND.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, location);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+/// Whether a link's redirect may be kept in the Redis cache: a plain redirect
+/// to a URL, with no password, click cap or interstitial to enforce per
+/// request. A file link never is. Its destination is signed for one visit and
+/// expires, so there is nothing that could be served again later.
+pub(crate) fn redirect_is_cacheable(link: &links::Model) -> bool {
+    link.password_hash.is_none()
+        && link.effective_max_clicks().is_none()
+        && !link.safe_link_interstitial
+        && !link.is_file()
+}
+
+/// Whether a cache entry may be served without the database path. The same
+/// rule as [`redirect_is_cacheable`], applied to what was stored: an entry
+/// that holds a file marker is ignored, however it got there.
+pub(crate) fn cached_redirect_is_servable(cached: &crate::utils::cache::CachedLink) -> bool {
+    !cached.has_password
+        && cached.max_clicks.is_none()
+        && !cached.safe_link_interstitial
+        && !cached.original_url.starts_with(links::FILE_LINK_PREFIX)
+}
+
+#[cfg(test)]
+mod file_link_cache_tests {
+    use super::{cached_redirect_is_servable, redirect_is_cacheable};
+    use crate::entity::links;
+    use crate::utils::cache::CachedLink;
+
+    fn link(original_url: &str) -> links::Model {
+        links::Model {
+            id: 1,
+            code: "abc".to_string(),
+            original_url: original_url.to_string(),
+            user_id: Some(1),
+            created_at: chrono::Utc::now().naive_utc(),
+            click_count: 0,
+            expires_at: None,
+            password_hash: None,
+            title: None,
+            notes: None,
+            folder_id: None,
+            org_id: None,
+            starts_at: None,
+            max_clicks: None,
+            deleted_at: None,
+            is_pinned: false,
+            burn_after_reading: false,
+            burned_at: None,
+            safe_link_interstitial: false,
+            bio_visible: false,
+            bio_position: None,
+            bio_label: None,
+            expiry_notice_sent_at: None,
+        }
+    }
+
+    fn cached(original_url: &str) -> CachedLink {
+        CachedLink {
+            id: 1,
+            original_url: original_url.to_string(),
+            has_password: false,
+            expires_at: None,
+            starts_at: None,
+            max_clicks: None,
+            click_count: 0,
+            user_id: Some(1),
+            org_id: None,
+            safe_link_interstitial: false,
+        }
+    }
+
+    #[test]
+    fn a_plain_url_link_is_cached_and_a_file_link_never_is() {
+        assert!(redirect_is_cacheable(&link("https://iana.org/")));
+        assert!(!redirect_is_cacheable(&link(&links::file_link_marker(7))));
+    }
+
+    #[test]
+    fn the_older_reasons_not_to_cache_still_hold() {
+        let mut protected = link("https://iana.org/");
+        protected.password_hash = Some("hash".to_string());
+        assert!(!redirect_is_cacheable(&protected));
+
+        let mut capped = link("https://iana.org/");
+        capped.max_clicks = Some(3);
+        assert!(!redirect_is_cacheable(&capped));
+
+        let mut interstitial = link("https://iana.org/");
+        interstitial.safe_link_interstitial = true;
+        assert!(!redirect_is_cacheable(&interstitial));
+    }
+
+    #[test]
+    fn a_cache_entry_holding_a_file_marker_is_not_served() {
+        assert!(cached_redirect_is_servable(&cached("https://iana.org/")));
+        assert!(!cached_redirect_is_servable(&cached(
+            &links::file_link_marker(7)
+        )));
+
+        let mut capped = cached("https://iana.org/");
+        capped.max_clicks = Some(1);
+        assert!(!cached_redirect_is_servable(&capped));
+    }
+}
+
 /// The link's smart-routing rules in priority order, or none when conditional
 /// routing is switched off (the link then degrades to a plain redirect).
 async fn active_routing_rules(
@@ -2126,7 +2317,7 @@ pub fn anonymous_links_allowed() -> bool {
 pub async fn create_link(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut payload): Json<CreateLinkRequest>,
+    Json(payload): Json<CreateLinkRequest>,
 ) -> impl IntoResponse {
     // Resolve the caller first, so rejected credentials are refused before any
     // validation or DNS lookup is spent on the request.
@@ -2140,6 +2331,28 @@ pub async fn create_link(
             "Sign in or send an API key to create a link.",
         );
     }
+    insert_link(&state, user_id, payload, None).await
+}
+
+/// Marks the response `insert_link` gives when the upload it was asked to make
+/// a link for already has one: another "complete" for it got there first.
+#[derive(Clone, Copy)]
+pub(crate) struct UploadAlreadyCompleted;
+
+/// Create a link for a caller who is already authenticated. The one place a
+/// link row is made by `POST /links` and by completing a file upload, so the
+/// alias rules, the default organization, the link cap, folder and tag scope,
+/// the password and the click settings are the same for both.
+///
+/// `file` is the pending upload the link will serve. The link then has no URL:
+/// the URL checks do not apply, `original_url` holds the file marker, and the
+/// upload is joined to the link in the same transaction as the insert.
+pub(crate) async fn insert_link(
+    state: &AppState,
+    user_id: Option<i32>,
+    mut payload: CreateLinkRequest,
+    file: Option<&link_files::Model>,
+) -> Response {
     // A member of the default organization creates their links there, from
     // the dashboard, an API key or the connector alike.
     if payload.org_id.is_none()
@@ -2148,16 +2361,24 @@ pub async fn create_link(
         payload.org_id = crate::handlers::default_org::home_org(&state.db, uid).await;
     }
 
-    // Validate URL first
-    let validated_url = match validate_url(&payload.original_url) {
-        Ok(url) => url,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
+    // Validate URL first. A file link has none: its `original_url` is the
+    // marker `GET /{code}` recognises, which no URL can be mistaken for.
+    let validated_url = match file {
+        Some(file) => links::file_link_marker(file.id),
+        None => {
+            let validated_url = match validate_url(&payload.original_url) {
+                Ok(url) => url,
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
+                        .into_response();
+                }
+            };
+            if let Err(e) = ensure_public_destination(&validated_url).await {
+                return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
+            }
+            validated_url
         }
     };
-    if let Err(e) = ensure_public_destination(&validated_url).await {
-        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
-    }
 
     // An empty password is no password. The unlock form will not submit an
     // empty field, so a link "protected" by "" could never be opened from the
@@ -2182,7 +2403,7 @@ pub async fn create_link(
             .flatten();
 
         if let Some(u) = user
-            && !verification_satisfied(&state, &u)
+            && !verification_satisfied(state, &u)
         {
             return (
                 StatusCode::FORBIDDEN,
@@ -2222,8 +2443,11 @@ pub async fn create_link(
     // organization they have since left, so deleting or leaving does not reset
     // it. It expires, so unlike MAX_LINKS_PER_USER it cannot lock the account
     // out. Bulk create does not apply this check. A database error fail-opens,
-    // as the old count did: the insert below still has to succeed.
-    if let Some(uid) = user_id {
+    // as the old count did: the insert below still has to succeed. Every file
+    // link has a marker of its own, so there is nothing to count for one.
+    if let Some(uid) = user_id
+        && file.is_none()
+    {
         let now = chrono::Utc::now().naive_utc();
         let window = chrono::Duration::minutes(SAME_URL_WINDOW_MINUTES);
         let recent = links::Entity::find()
@@ -2252,7 +2476,9 @@ pub async fn create_link(
     }
 
     // Check if URL or domain is blocked (MUST be checked before any link creation)
-    if let Err(e) = check_blocked(&state.db, &validated_url).await {
+    if file.is_none()
+        && let Err(e) = check_blocked(&state.db, &validated_url).await
+    {
         return (StatusCode::FORBIDDEN, Json(ErrorResponse { error: e })).into_response();
     }
 
@@ -2260,7 +2486,7 @@ pub async fn create_link(
     let custom_aliases_enabled = env_flag("ENABLE_CUSTOM_ALIASES", true);
 
     let using_custom_alias = payload.custom_alias.is_some();
-    let code = if let Some(alias) = payload.custom_alias {
+    let code = if let Some(alias) = payload.custom_alias.take() {
         // Check if custom aliases are enabled
         if !custom_aliases_enabled {
             return (
@@ -2487,6 +2713,38 @@ pub async fn create_link(
         }
     };
 
+    // Join the upload to its link, in the transaction that made the link. Only
+    // an upload that is still pending can be claimed, so two "complete" calls
+    // for one upload make one link: the loser rolls its link back.
+    if let Some(file) = file {
+        let claimed = link_files::Entity::update_many()
+            .col_expr(link_files::Column::LinkId, Expr::value(link_id))
+            .col_expr(
+                link_files::Column::Status,
+                Expr::value(link_files::STATUS_READY),
+            )
+            .filter(link_files::Column::Id.eq(file.id))
+            .filter(link_files::Column::Status.eq(link_files::STATUS_PENDING))
+            .filter(link_files::Column::LinkId.is_null())
+            .filter(link_files::Column::DeletedAt.is_null())
+            .exec(&txn)
+            .await;
+        match claimed {
+            Ok(result) if result.rows_affected == 1 => {}
+            Ok(_) => {
+                let _ = txn.rollback().await;
+                let mut response =
+                    json_error(StatusCode::CONFLICT, "This upload was already completed");
+                response.extensions_mut().insert(UploadAlreadyCompleted);
+                return response;
+            }
+            Err(_) => {
+                let _ = txn.rollback().await;
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+            }
+        }
+    }
+
     for tag_id in tag_ids {
         let link_tag = link_tags::ActiveModel {
             link_id: Set(link_id),
@@ -2533,7 +2791,11 @@ pub async fn create_link(
             code: code.clone(),
             short_url: format!("{}/{}", base_url, code),
             api_url: format!("{}/{}", api_url, code),
-            original_url: payload.original_url,
+            original_url: if file.is_some() {
+                String::new()
+            } else {
+                payload.original_url
+            },
             title: payload.title,
             click_count: 0,
             created_at: utc_rfc3339(chrono::Utc::now().naive_utc()),
@@ -2555,6 +2817,7 @@ pub async fn create_link(
             tags,
             created_by: None,
             can_delete: None,
+            file: file.map(LinkFileInfo::of),
         }),
     )
         .into_response()
@@ -2681,9 +2944,14 @@ pub async fn preview_link(
             // password-protected target so the interstitial can describe it.
             // Burn links stay secret until the authoritative redirect consumes
             // their one-time click.
-            let mut blocked = check_blocked(&state.db, &link.original_url).await.is_err();
+            // A file link has no URL to look up on the blocklist, and its
+            // destination is a signed address made per visit by GET /{code}:
+            // the preview never describes it.
+            let mut blocked =
+                !link.is_file() && check_blocked(&state.db, &link.original_url).await.is_err();
             let mut destination = None;
             if link.is_active()
+                && !link.is_file()
                 && !blocked
                 && !link.burn_after_reading
                 && (link.password_hash.is_none() || password_unlocked)
@@ -2978,10 +3246,7 @@ pub async fn redirect_link(
                 if let Some(cached) = cached {
                     // Skip cache for password-protected links, max_clicks links,
                     // and interstitial links (need per-request handling).
-                    if !cached.has_password
-                        && cached.max_clicks.is_none()
-                        && !cached.safe_link_interstitial
-                    {
+                    if cached_redirect_is_servable(&cached) {
                         let fresh_click_count =
                             match cached_link_is_still_plain(&state.db, &code, &cached).await {
                                 Ok(Some(click_count)) => Some(click_count),
@@ -3111,8 +3376,9 @@ pub async fn redirect_link(
 
         // Enforce content blocking at redirect time so a block applied after the
         // link was created is retroactive. Runs before the caching block below, so
-        // a blocked link is never (re)written to the cache.
-        if check_blocked(&state.db, &link.original_url).await.is_err() {
+        // a blocked link is never (re)written to the cache. A file link has no
+        // URL to block; taking one down is deleting it.
+        if !link.is_file() && check_blocked(&state.db, &link.original_url).await.is_err() {
             return dead_link(&headers, StatusCode::GONE, "This link has been disabled");
         }
 
@@ -3232,7 +3498,12 @@ pub async fn redirect_link(
         // degrades to a plain redirect. Resolved (and blocklist-checked) BEFORE the
         // cap consume below, so a blocked routed destination can't waste a click
         // slot or burn a one-time link without serving anything.
-        let routing_rules = active_routing_rules(&state.db, link.id).await;
+        // A file link is not routed: it serves its one file.
+        let routing_rules = if link.is_file() {
+            Vec::new()
+        } else {
+            active_routing_rules(&state.db, link.id).await
+        };
 
         let routed_destination = if !routing_rules.is_empty() {
             let (ua_info, geo, accept_language) = routing_signals(&headers);
@@ -3261,7 +3532,9 @@ pub async fn redirect_link(
         // which would defeat the cap.
         let can_be_used_up = link.max_clicks.is_some() || link.burn_after_reading;
         if method == Method::HEAD {
-            if can_be_used_up {
+            // A file link's destination is a signed address, made only for a
+            // visit that is counted. A HEAD is not one.
+            if can_be_used_up || link.is_file() {
                 return head_without_destination();
             }
             return destination_redirect(
@@ -3276,6 +3549,27 @@ pub async fn redirect_link(
         {
             return unfurler_page();
         }
+
+        // A file link: every check a link has is behind us (live, owner
+        // active, cap not reached, password, interstitial), so the file's
+        // address may be signed now. It is signed before the cap is consumed:
+        // a file that is gone, or a bucket that cannot sign, must not use up a
+        // click or burn a one-time link.
+        let file_destination = if link.is_file() {
+            match crate::handlers::files::signed_destination(&state, link.id).await {
+                Ok(Some(url)) => Some(url),
+                Ok(None) => {
+                    return dead_link(
+                        &headers,
+                        StatusCode::GONE,
+                        "This file is no longer available",
+                    );
+                }
+                Err(()) => return link_state_unavailable().into_response(),
+            }
+        } else {
+            None
+        };
 
         // Authoritative cap enforcement. From here on this request will be
         // served a destination, so for capped links the click is consumed NOW
@@ -3331,10 +3625,9 @@ pub async fn redirect_link(
         }
 
         // Cache the link for future requests (only plain redirects — no password,
-        // click cap, or interstitial, which need the DB path).
-        if link.password_hash.is_none()
-            && link.effective_max_clicks().is_none()
-            && !link.safe_link_interstitial
+        // click cap, or interstitial, which need the DB path, and never a
+        // file link, whose destination is signed per visit).
+        if redirect_is_cacheable(&link)
             && let (Some(cache), Some(generation)) = (&state.redis_cache, cache_generation)
         {
             let cached = CachedLink {
@@ -3373,6 +3666,9 @@ pub async fn redirect_link(
             &headers,
         );
 
+        if let Some(url) = file_destination {
+            return file_redirect(&url);
+        }
         destination_redirect(&link.original_url)
     } else {
         dead_link(&headers, StatusCode::NOT_FOUND, "Link not found")
@@ -4465,6 +4761,13 @@ pub async fn replace_routing_rules(
         Err(denied) => return denied.into_response(),
     };
 
+    if link.is_file() && !payload.rules.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "A file link serves its file to every visitor and cannot have routing rules",
+        );
+    }
+
     if payload.rules.len() > MAX_ROUTING_RULES {
         return json_error(
             StatusCode::BAD_REQUEST,
@@ -4759,7 +5062,7 @@ pub async fn get_user_links(
 
     let base_url = get_base_url();
     let api_url = get_api_url();
-    let response: Vec<LinkResponse> = user_links
+    let mut response: Vec<LinkResponse> = user_links
         .iter()
         .map(|l| {
             let tags = tags_by_link.remove(&l.id).unwrap_or_default();
@@ -4771,6 +5074,10 @@ pub async fn get_user_links(
             item
         })
         .collect();
+    if let Err(error) = attach_file_info(&state.db, &user_links, &mut response).await {
+        tracing::error!("Failed to load files for the link list: {}", error);
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+    }
 
     link_page(total, response).into_response()
 }
@@ -4810,17 +5117,28 @@ pub async fn get_link(
         Err(denied) => return denied.into_response(),
     };
 
-    let tags = get_link_tags(&state.db, link.id).await;
-    (
-        StatusCode::OK,
-        Json(LinkResponse::from_model(
-            &link,
-            tags,
-            &get_base_url(),
-            &get_api_url(),
-        )),
-    )
-        .into_response()
+    match link_response(&state.db, &link).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+    }
+}
+
+/// One stored link as the API shows it, with its tags and, for a file link,
+/// its file.
+pub(crate) async fn link_response(
+    db: &DatabaseConnection,
+    link: &links::Model,
+) -> Result<LinkResponse, DbErr> {
+    let tags = get_link_tags(db, link.id).await;
+    let mut response = [LinkResponse::from_model(
+        link,
+        tags,
+        &get_base_url(),
+        &get_api_url(),
+    )];
+    attach_file_info(db, [link], &mut response).await?;
+    let [response] = response;
+    Ok(response)
 }
 
 /// Delete a link
@@ -4868,6 +5186,13 @@ pub async fn delete_link(
 
     match active_link.update(&state.db).await {
         Ok(_) => {
+            // The link is gone, so its file goes too. A bucket that will not
+            // delete does not undo the link's deletion: the daily sweep finds
+            // the file again.
+            crate::utils::files::FilesOfLinks::of_links(&state, &[link.id])
+                .await
+                .remove(&state)
+                .await;
             if invalidate_cached_code_required(&state, &link.code)
                 .await
                 .is_err()
@@ -5131,7 +5456,25 @@ pub async fn update_link(
         return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
     }
 
-    if let Some(ref url) = payload.original_url {
+    // A file link serves its file and nothing else. Pointing it at a URL would
+    // leave the stored file with no link to delete it. An empty string is what
+    // the API shows as a file link's `original_url`, so echoing it changes
+    // nothing.
+    if link.is_file()
+        && payload
+            .original_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty())
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "A file link's destination cannot be changed. Upload the new file as a new link.",
+        );
+    }
+
+    if let Some(ref url) = payload.original_url
+        && !link.is_file()
+    {
         // Validate URL format and sanitize
         let validated_url = match validate_url(url) {
             Ok(u) => u,
@@ -5491,38 +5834,40 @@ pub async fn update_link(
             let tags = get_link_tags(&state.db, updated.id).await;
             let base_url = get_base_url();
             let api_url = get_api_url();
-            (
-                StatusCode::OK,
-                Json(LinkResponse {
-                    id: updated.id,
-                    code: updated.code.clone(),
-                    short_url: format!("{}/{}", base_url, updated.code),
-                    api_url: format!("{}/{}", api_url, updated.code),
-                    original_url: updated.original_url.clone(),
-                    title: updated.title.clone(),
-                    click_count: updated.click_count,
-                    created_at: utc_rfc3339(updated.created_at),
-                    expires_at: updated.expires_at.map(utc_rfc3339),
-                    has_password: updated.password_hash.is_some(),
-                    notes: updated.notes.clone(),
-                    folder_id: updated.folder_id,
-                    org_id: updated.org_id,
-                    starts_at: updated.starts_at.map(utc_rfc3339),
-                    max_clicks: updated.max_clicks,
-                    burn_after_reading: updated.burn_after_reading,
-                    burned_at: updated.burned_at.map(utc_rfc3339),
-                    safe_link_interstitial: updated.safe_link_interstitial,
-                    bio_visible: updated.bio_visible,
-                    bio_label: updated.bio_label.clone(),
-                    bio_position: updated.bio_position,
-                    is_active: updated.is_active(),
-                    is_pinned: updated.is_pinned,
-                    tags,
-                    created_by: None,
-                    can_delete: None,
-                }),
-            )
-                .into_response()
+            let mut response = [LinkResponse {
+                id: updated.id,
+                code: updated.code.clone(),
+                short_url: format!("{}/{}", base_url, updated.code),
+                api_url: format!("{}/{}", api_url, updated.code),
+                original_url: updated.shown_url().to_string(),
+                title: updated.title.clone(),
+                click_count: updated.click_count,
+                created_at: utc_rfc3339(updated.created_at),
+                expires_at: updated.expires_at.map(utc_rfc3339),
+                has_password: updated.password_hash.is_some(),
+                notes: updated.notes.clone(),
+                folder_id: updated.folder_id,
+                org_id: updated.org_id,
+                starts_at: updated.starts_at.map(utc_rfc3339),
+                max_clicks: updated.max_clicks,
+                burn_after_reading: updated.burn_after_reading,
+                burned_at: updated.burned_at.map(utc_rfc3339),
+                safe_link_interstitial: updated.safe_link_interstitial,
+                bio_visible: updated.bio_visible,
+                bio_label: updated.bio_label.clone(),
+                bio_position: updated.bio_position,
+                is_active: updated.is_active(),
+                is_pinned: updated.is_pinned,
+                tags,
+                created_by: None,
+                can_delete: None,
+                file: None,
+            }];
+            // The update is committed; a failed lookup here only leaves the
+            // file details off this one answer.
+            let _ = attach_file_info(&state.db, [&updated], &mut response).await;
+            let [response] = response;
+            (StatusCode::OK, Json(response)).into_response()
         }
         Err(_) => {
             let _ = txn.rollback().await;
@@ -5902,6 +6247,7 @@ pub async fn bulk_delete_links(
 
     let mut deleted = 0u64;
     let mut invalidated: Vec<String> = Vec::new();
+    let mut deleted_ids: Vec<i32> = Vec::new();
 
     // Ids the caller may not delete are skipped; `deleted` counts rows changed.
     for id in unique_ids(payload.ids) {
@@ -5923,9 +6269,16 @@ pub async fn bulk_delete_links(
             if active_link.update(&state.db).await.is_ok() {
                 deleted += 1;
                 invalidated.push(code);
+                deleted_ids.push(id);
             }
         }
     }
+
+    // The files of the deleted links go with them (see `delete_link`).
+    crate::utils::files::FilesOfLinks::of_links(&state, &deleted_ids)
+        .await
+        .remove(&state)
+        .await;
 
     // Drop cached redirects for the deleted codes so they stop resolving now,
     // not after the cache TTL.
@@ -6269,7 +6622,7 @@ fn export_rows(rows: &[links::Model], base_url: &str) -> String {
             "{},{},{},{},{},{},{},{},{},{},{},{}\n",
             link.id,
             csv_field(&link.code),
-            csv_field(&link.original_url),
+            csv_field(link.shown_url()),
             csv_field(&format!("{}/{}", base_url, link.code)),
             link.click_count,
             csv_field(&utc_rfc3339(link.created_at)),
@@ -6371,6 +6724,15 @@ pub async fn clone_link(
         Ok(link) => link,
         Err(denied) => return denied.into_response(),
     };
+
+    // One stored file, one link: a second link to the same object would be
+    // left serving nothing the day the first one is deleted or expires.
+    if link.is_file() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "A file link cannot be cloned. Upload the file again to make another link.",
+        );
+    }
 
     // Re-check the destination. A link stored before this rule, or written
     // straight into the database, must not be cloned into a fresh code.

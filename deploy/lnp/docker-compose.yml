@@ -113,6 +113,16 @@ services:
       BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
       BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
       BACKUP_S3_REGION: ${BACKUP_S3_REGION:-us-east-2}
+      # File sharing (README, "File sharing"): a private bucket for uploaded
+      # files, separate from the backup bucket. Off while the bucket is blank.
+      FILES_S3_BUCKET: ${FILES_S3_BUCKET:-}
+      FILES_S3_REGION: ${FILES_S3_REGION:-}
+      FILES_S3_ENDPOINT: ${FILES_S3_ENDPOINT:-}
+      FILES_S3_ACCESS_KEY: ${FILES_S3_ACCESS_KEY:-}
+      FILES_S3_SECRET_KEY: ${FILES_S3_SECRET_KEY:-}
+      FILES_MAX_BYTES: ${FILES_MAX_BYTES:-}
+      FILES_UPLOAD_URL_TTL_SECS: ${FILES_UPLOAD_URL_TTL_SECS:-}
+      FILES_DOWNLOAD_URL_TTL_SECS: ${FILES_DOWNLOAD_URL_TTL_SECS:-}
     volumes:
       - backend_logs:/app/logs
       - backend_geoip:/app/data

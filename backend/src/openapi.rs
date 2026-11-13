@@ -2,8 +2,8 @@ use utoipa::{OpenApi, ToResponse, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers::{
-    admin, analytics, api_keys, auth, bio, cf_access, contact, default_org, folders, google_auth,
-    links, organizations, passkeys, preview_image, reports, tags,
+    admin, analytics, api_keys, auth, bio, cf_access, contact, default_org, files, folders,
+    google_auth, links, organizations, passkeys, preview_image, reports, tags,
 };
 
 /// `info.description` of the served document (Markdown), set in [`api_doc`].
@@ -109,6 +109,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
     tags(
         (name = "Authentication", description = "User registration, login, and passkey management"),
         (name = "Links", description = "Create, manage, and redirect shortened URLs"),
+        (name = "Files", description = "Upload a file and share it as a short link. Only on an instance with file storage configured"),
         (name = "Analytics", description = "View click statistics and analytics"),
         (name = "Organizations", description = "Team and organization management"),
         (name = "Folders", description = "Organize links into folders"),
@@ -170,6 +171,9 @@ pub struct TooManyRequests(pub RateLimitResponse);
         links::bulk_update_links,
         links::export_links_csv,
         links::clone_link,
+        files::start_upload,
+        files::complete_upload,
+        files::get_usage,
         links::toggle_pin,
         links::check_code_availability,
         links::check_url_health,
@@ -280,6 +284,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
             auth::MessageResponse,
             auth::AppSettingsResponse,
             default_org::DefaultOrgInfo,
+            auth::FileSharingInfo,
             auth::UserProfileResponse,
             auth::UpdateProfileRequest,
 
@@ -317,6 +322,11 @@ pub struct TooManyRequests(pub RateLimitResponse);
             links::BulkUpdateRequest,
             links::LinksQuery,
             links::LinkResponse,
+            links::LinkFileInfo,
+            files::StartUploadRequest,
+            files::StartUploadResponse,
+            files::CompleteUploadRequest,
+            files::FileUsageResponse,
             links::CreateLinkResponse,
             links::BulkCreateLinkResponse,
             links::BulkCreateFailure,

@@ -22,6 +22,7 @@ Kept small so they carry across upstream releases:
 - `frontend/src/pages/Dashboard.tsx` and `src/components/dashboard/LinkViewToggle.tsx` (new): when the settings carry `default_org` and the account is a member, the dashboard works in that organization and offers "My Links" / "All LNP Links".
 - `frontend/nginx.conf` and `frontend/Dockerfile`: an `include /etc/nginx/site.d/*.conf;` point (empty in the stock image), and the `CSP_GOOGLE_SIGN_IN` build arg, which adds Google's sign-in sources to the Content-Security-Policy. Only the dashboard image sets it; without it the policy is the stock one.
 - `frontend/themes/lnp.js` and `frontend/themes/lnp/public/` (new): the Leadership Now Project look (navy, grey, Plus Jakarta Sans, square corners, LNP logo and icons), applied only when the frontend is built with `VITE_THEME=lnp` (the dashboard image). `tailwind.config.js` merges it in; `src/index.css` takes its body colours and fonts from the config; `Logo.tsx` shows the LNP logo; the Dockerfile copies the theme's icons over the stock ones. `src/designTokens.lnp.test.ts` checks its colours for WCAG AA contrast.
+- File sharing (below, "File sharing"): `backend/src/utils/files/` (the `FileStore` trait, its S3 and in-memory implementations, how a file is served, the sweep), `backend/src/handlers/files.rs` (`/files/uploads`, `/files/uploads/{id}/complete`, `/files/usage`), the `link_files` table, and `links.rs`, where `POST /links` and completing an upload share `insert_link` and `GET /{code}` signs a file link's address. A file link is a link whose `original_url` is the marker `opn-file:<id>`; the API shows it as an empty URL plus a `file` object. Frontend: `CreateFilesTab.tsx`, `AliasField.tsx` (the alias control, taken out of `CreateLinkForm.tsx` so both tabs use it), and the file row in `LinkRow.tsx`. `frontend/Dockerfile` takes `CSP_FILES_UPLOAD_ORIGIN`. Off unless `FILES_S3_BUCKET` is set; the `/files` routes answer 404 then.
 - `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only. `deploy/lnp/mcp/` is the Claude connector (below); it uses the published `opn-mcp` package unchanged.
 
 The first account to sign in becomes the instance admin.
@@ -84,6 +85,85 @@ DEFAULT_ORG_ADMINS=jay.shapiro@leadershipnowproject.com,marie@leadershipnowproje
 - Links that expire: the reminder email is for personal links only, so links in the organization get none (this deployment has no SMTP anyway).
 
 Do not change `DEFAULT_ORG_SLUG` afterwards: the slug is how the organization is found, and a new slug makes a new, empty one. To turn the feature off, blank the name or the slug; the organization and its links stay as they are, and people then see them under Teams.
+
+## File sharing
+
+From the dashboard's **Files** tab, staff upload a file of any type and share it as a short link (`https://ldr.now/<code>`). Off until `FILES_S3_BUCKET` is set: the tab then says file sharing is not set up, and nothing else changes.
+
+How it works:
+
+- The browser uploads straight to the bucket with a signed URL that works for 15 minutes, so a large file never passes through the app server or Cloudflare's upload limit. The largest file is `FILES_MAX_BYTES` (default 500 MB).
+- Opening the short link runs every check any link has (deleted, expired, scheduled, password, click limit), counts the click, then redirects to a signed download address that works for 5 minutes. Nothing else ever shows that address: not the link list, the CSV export, the preview page, or the cache.
+- PDF, PNG, JPEG, GIF and WebP open in the browser, and only when the file's name and its declared type agree. Everything else downloads, including HTML, SVG, XML and scripts, whatever type the uploader's browser gave it.
+- A file link may have no expiry (the default). The file is deleted from the bucket when its link is deleted or expires. Deleting removes it at once; expiry is picked up by a sweep that runs when the backend starts and then daily, which also retries any delete the bucket refused and removes uploads that were started and never completed (after 24 hours).
+- Each person sees the storage their own uploads use, in the Files tab.
+- A file link cannot be cloned or pointed at a URL, and has no routing rules. An admin who restores a deleted file link gets a link whose file is gone; it answers "This file is no longer available".
+
+### The bucket
+
+A new bucket, used for nothing else (not the backup bucket). The name must not contain dots: uploads go to `https://<bucket>.s3.<region>.amazonaws.com`, and a dot breaks the TLS certificate match.
+
+1. **Private.** Leave all four **Block Public Access** settings on, and add no bucket policy that grants anyone read access. Files reach visitors only through the short link.
+2. **CORS**, so the dashboard page may send the upload (Permissions, Cross-origin resource sharing):
+
+    ```json
+    [
+      {
+        "AllowedOrigins": ["https://links.leadershipnowproject.com"],
+        "AllowedMethods": ["PUT"],
+        "AllowedHeaders": ["content-type"],
+        "ExposeHeaders": [],
+        "MaxAgeSeconds": 3000
+      }
+    ]
+    ```
+
+    No rule for `GET`: a visitor's browser is redirected to the file, which is a plain navigation and needs no CORS.
+
+3. **Lifecycle rule**, whole bucket: *Delete expired object delete markers or incomplete multipart uploads*, abort incomplete multipart uploads after 1 day. Uploads are single `PUT`s today; the rule is there so a later, multipart uploader cannot leave invisible parts behind.
+
+    ```json
+    {
+      "Rules": [
+        {
+          "ID": "abort-incomplete-multipart-uploads",
+          "Status": "Enabled",
+          "Filter": {},
+          "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+        }
+      ]
+    }
+    ```
+
+    Do not add a rule that expires objects by age: a file link with no expiry would lose its file.
+
+4. **IAM policy** for the credentials the backend uses, and nothing more:
+
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "FileSharingObjects",
+          "Effect": "Allow",
+          "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+          "Resource": "arn:aws:s3:::BUCKET_NAME/*"
+        }
+      ]
+    }
+    ```
+
+    `arn:aws:s3:::BUCKET_NAME` (the bucket) and `arn:aws:s3:::BUCKET_NAME/*` (the objects in it) are different resources. These three actions are object actions, so the resource must end in `/*`; with the bare bucket ARN every upload and download is refused with 403. The policy deliberately has no `s3:ListBucket`. One consequence: asking S3 about an object that is not there answers 403, not 404, so completing an upload whose file never arrived reports "File storage is unavailable" instead of "The file has not been uploaded yet". Either way no link is made.
+
+### Settings
+
+`.env` (see `.env.example`): `FILES_S3_BUCKET`, `FILES_S3_REGION` (default `us-east-2`), and either an IAM user's `FILES_S3_ACCESS_KEY` and `FILES_S3_SECRET_KEY`, or both blank to use the server's own AWS credentials (an instance role with the policy above; the instance's metadata hop limit must be 2 for a container to reach it). `FILES_S3_ENDPOINT` stays blank for AWS.
+
+The dashboard's Content-Security-Policy must allow the upload. Set the repository variable `LNP_FILES_UPLOAD_ORIGIN` to `https://<bucket>.s3.<region>.amazonaws.com` (Settings, Secrets and variables, Actions, Variables) **before** building the image tag that turns the feature on. `lnp-images.yml` passes it to the dashboard image as the `CSP_FILES_UPLOAD_ORIGIN` build arg. Without it the Files tab starts an upload and the browser blocks it.
+
+Turning it on, in this order: create the bucket (steps 1 to 4), set the repository variable, build and deploy an image tag, then add the `FILES_*` settings to `.env` and `docker compose up -d`. Check with one small PDF and one `.html` file: the PDF opens in the browser, the HTML file downloads.
+
+To turn it off, blank `FILES_S3_BUCKET`. Existing file links then answer "This file is no longer available" and their files stay in the bucket until it is set again.
 
 ## Claude connector
 

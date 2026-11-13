@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Plus, ChevronDown, Lock, Calendar, Flame, ShieldCheck, MousePointer } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { API_ENDPOINTS, SessionExpiredError, authFetch, responseError, shortLinkHost, type CheckCodeResponse } from '../../config/api';
+import { API_ENDPOINTS, SessionExpiredError, authFetch, responseError } from '../../config/api';
 import logger from '../../utils/logger';
 import { savePendingUrl } from '../../utils/pendingUrl';
 import { localIsoDate } from '../../utils/localIsoDate';
@@ -12,17 +12,17 @@ import UtmBuilder from './UtmBuilder';
 import { DestinationCheckButton, DestinationStatus } from './DestinationCheck';
 import { useDestinationCheck } from './useDestinationCheck';
 import QuickAddCatalog from './QuickAddCatalog';
+import AliasField from './AliasField';
+import { aliasProblem } from './aliasCheck';
 import LinkPreviewCard from '../LinkPreviewCard';
 import {
     CLICK_LIMIT_ERROR,
     CLICK_LIMIT_HINT,
     MAX_NOTES_CHARS,
     START_BEFORE_EXPIRY,
-    aliasHintFrom,
     burnCapHint,
     datetimeLocalToUtc,
     parseClickLimit,
-    type AliasHint,
 } from './linkFields';
 
 interface CreateLinkFormProps {
@@ -39,10 +39,6 @@ interface CreateLinkFormProps {
     orgName?: string | null;
     /** A folder or tag was created from this form: reload that list. */
     onCatalogChanged?: (kind: 'folder' | 'tag') => void;
-}
-
-function isAbort(error: unknown): boolean {
-    return typeof error === 'object' && error !== null && 'name' in error && (error as { name: unknown }).name === 'AbortError';
 }
 
 const fieldClass = 'w-full rounded-lg border border-line2 bg-surface px-4 py-2 text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint';
@@ -63,7 +59,6 @@ export default function CreateLinkForm({
 }: CreateLinkFormProps) {
     const [newUrl, setNewUrl] = useState(initialUrl);
     const [alias, setAlias] = useState('');
-    const [aliasHint, setAliasHint] = useState<AliasHint | null>(null);
     const [title, setTitle] = useState('');
     const [notes, setNotes] = useState('');
     const [password, setPassword] = useState('');
@@ -92,48 +87,6 @@ export default function CreateLinkForm({
         setTagIds([]);
     }, [orgId]);
 
-    // Below the configured minimum the server only repeats the length rule,
-    // so the form waits until the alias could actually be free or taken.
-    useEffect(() => {
-        if (!appSettings.custom_aliases_enabled) return;
-        const code = alias;
-        if (code.length < appSettings.min_alias_length) {
-            setAliasHint(null);
-            return;
-        }
-        // Drop the previous answer immediately so a slow response cannot sit
-        // under an alias it was not about.
-        setAliasHint(null);
-        const controller = new AbortController();
-        let ignore = false;
-        const timer = window.setTimeout(async () => {
-            try {
-                const res = await authFetch(`${API_ENDPOINTS.checkCode}?${new URLSearchParams({ code })}`, {
-                    signal: controller.signal,
-                });
-                if (ignore) return;
-                if (!res.ok) {
-                    // A 429 here says how long to wait; anything else that
-                    // failed is still worth a word rather than a silent blank.
-                    const text = await responseError(res, 'Could not check this alias');
-                    if (!ignore) setAliasHint({ text, ok: false });
-                    return;
-                }
-                const data = await res.json() as CheckCodeResponse;
-                if (ignore || data.code !== code) return;
-                setAliasHint(aliasHintFrom(data));
-            } catch (error) {
-                if (ignore || isAbort(error)) return;
-                setAliasHint(null);
-            }
-        }, 300);
-        return () => {
-            ignore = true;
-            window.clearTimeout(timer);
-            controller.abort();
-        };
-    }, [alias, appSettings.custom_aliases_enabled, appSettings.min_alias_length]);
-
     // Clipboard is read only from this click. A mount or focus listener prompts
     // (or, in some browsers, reads) without the user asking.
     const pasteClipboardUrl = async () => {
@@ -155,30 +108,12 @@ export default function CreateLinkForm({
         setCreating(true);
         onError('');
 
-        // Validate alias length if provided
-        if (alias) {
-            if (alias.length < appSettings.min_alias_length) {
-                onError(`Alias must be at least ${appSettings.min_alias_length} characters`);
-                setCreating(false);
-                return;
-            }
-            if (alias.length > appSettings.max_alias_length) {
-                onError(`Alias must be at most ${appSettings.max_alias_length} characters`);
-                setCreating(false);
-                return;
-            }
-            // Check for valid characters
-            if (!/^[a-zA-Z0-9_-]+$/.test(alias)) {
-                onError('Alias can only contain letters, numbers, hyphens, and underscores');
-                setCreating(false);
-                return;
-            }
-            // Check for leading/trailing special chars
-            if (/^[-_]|[-_]$/.test(alias)) {
-                onError('Alias cannot start or end with hyphen or underscore');
-                setCreating(false);
-                return;
-            }
+        // Length, characters and the leading or trailing hyphen rule.
+        const badAlias = aliasProblem(alias, appSettings);
+        if (badAlias) {
+            onError(badAlias);
+            setCreating(false);
+            return;
         }
 
         // Burn is stored as a one-click cap when no cap is sent. A number here
@@ -291,40 +226,13 @@ export default function CreateLinkForm({
                     destination go under the actions. */}
                 {appSettings.custom_aliases_enabled && (
                     <>
-                        <p className={labelClass}>Short link</p>
-                        {/* Between `lg` and `xl` the card is too narrow for the
-                            host and a usable alias field side by side, so
-                            the field goes under the host. */}
-                        <div className="flex items-stretch lg:max-xl:flex-col">
-                            <span className="inline-flex items-center rounded-l-lg border border-r-0 border-line2 bg-paper px-3 font-mono text-sm text-muted lg:max-xl:rounded-bl-none lg:max-xl:rounded-tr-lg lg:max-xl:border-b-0 lg:max-xl:border-r lg:max-xl:py-2">
-                                https://{shortLinkHost()}/
-                            </span>
-                            <label htmlFor="create-alias" className="sr-only">Custom alias</label>
-                            <input
-                                id="create-alias"
-                                type="text"
-                                placeholder={`alias (${appSettings.min_alias_length}-${appSettings.max_alias_length} chars)`}
-                                aria-describedby={aliasHint ? 'create-alias-hint' : 'create-alias-help'}
-                                className="min-w-0 flex-1 rounded-r-lg border border-line2 bg-surface px-4 py-2.5 font-mono text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint lg:max-xl:rounded-bl-lg lg:max-xl:rounded-tr-none"
-                                value={alias}
-                                onChange={(e) => setAlias(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))}
-                                minLength={appSettings.min_alias_length}
-                                maxLength={appSettings.max_alias_length}
-                            />
-                        </div>
-                        {aliasHint ? (
-                            <p
-                                id="create-alias-hint"
-                                role="status"
-                                className={`mt-1.5 text-xs ${aliasHint.ok ? 'text-success' : 'text-danger'}`}
-                            >
-                                {aliasHint.text}
-                            </p>
-                        ) : (
-                            <p id="create-alias-help" className="mt-1.5 text-xs text-faint">
-                                Leave empty for a random code.
-                            </p>
-                        )}
+                        <AliasField
+                            idPrefix="create"
+                            alias={alias}
+                            onChange={setAlias}
+                            settings={appSettings}
+                            labelClass={labelClass}
+                        />
                         <p className="my-3 text-sm text-muted">leads to…</p>
                     </>
                 )}

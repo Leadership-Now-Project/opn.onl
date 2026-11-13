@@ -404,7 +404,9 @@ pub async fn get_link_stats(
         })
         .collect();
 
-    let clicks_by_destination = destination_breakdown(&events, &link.original_url);
+    // A file link's marker is not a destination: its clicks are listed under
+    // an empty one.
+    let clicks_by_destination = destination_breakdown(&events, link.shown_url());
 
     // Recent clicks (last 100)
     let recent_clicks: Vec<RecentClick> = events
@@ -451,8 +453,8 @@ pub async fn get_link_stats(
 
     let response = LinkStatsResponse {
         link_id: id,
+        original_url: link.shown_url().to_string(),
         code: link.code,
-        original_url: link.original_url,
         total_clicks,
         truncated,
         unique_visitors,
@@ -781,7 +783,12 @@ async fn dashboard_stats(db: &DatabaseConnection, user_id: i32) -> Result<Dashbo
         .map(|(id, code, original_url, click_count)| TopLink {
             id,
             code,
-            original_url,
+            // A file link's marker is not a destination to show.
+            original_url: if original_url.starts_with(links::FILE_LINK_PREFIX) {
+                String::new()
+            } else {
+                original_url
+            },
             click_count,
         })
         .collect();

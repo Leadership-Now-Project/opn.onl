@@ -737,14 +737,14 @@ pub async fn get_folder_links(
     let base_url = crate::handlers::links::get_base_url();
     let api_url = crate::handlers::links::get_api_url();
     let mut responses = Vec::new();
-    for l in links_list {
+    for l in &links_list {
         let link_tags = tags_by_link.remove(&l.id).unwrap_or_default();
         responses.push(crate::handlers::links::LinkResponse {
             id: l.id,
             code: l.code.clone(),
             short_url: format!("{}/{}", base_url, l.code),
             api_url: format!("{}/{}", api_url, l.code),
-            original_url: l.original_url.clone(),
+            original_url: l.shown_url().to_string(),
             title: l.title.clone(),
             click_count: l.click_count,
             created_at: utc_rfc3339(l.created_at),
@@ -766,8 +766,17 @@ pub async fn get_folder_links(
             tags: link_tags,
             created_by: None,
             can_delete: None,
+            file: None,
         });
     }
+    crate::handlers::links::attach_file_info(&state.db, &links_list, &mut responses)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            )
+        })?;
 
     Ok(link_page(total, responses))
 }

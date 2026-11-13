@@ -85,6 +85,11 @@ export const API_ENDPOINTS = {
     linkTags: (id: number) => `${API_BASE_URL}/links/${id}/tags`,
     linkRules: (id: number) => `${API_BASE_URL}/links/${id}/rules`,
     linkRealtimeClicks: (id: number) => `${API_BASE_URL}/links/${id}/clicks/realtime`,
+
+    // File sharing. These answer 404 unless /auth/settings carries `files`.
+    fileUploads: `${API_BASE_URL}/files/uploads`,
+    fileUploadComplete: (uploadId: number) => `${API_BASE_URL}/files/uploads/${uploadId}/complete`,
+    fileUsage: `${API_BASE_URL}/files/usage`,
     
     // Analytics
     dashboardStats: `${API_BASE_URL}/analytics/dashboard`,
@@ -356,6 +361,21 @@ export interface BuildUtmResponse {
     original_url: string;
     url_with_utm: string;
     utm_params: Record<string, string>;
+}
+
+/** POST /files/uploads: where the browser sends the file, and the headers that request needs. */
+export interface StartUploadResponse {
+    upload_id: number;
+    upload_url: string;
+    required_headers: Record<string, string>;
+    expires_at: string;
+}
+
+/** GET /files/usage: the storage the caller's own uploads take. */
+export interface FileUsage {
+    bytes_used: number;
+    file_count: number;
+    max_file_bytes: number;
 }
 
 export interface Link {

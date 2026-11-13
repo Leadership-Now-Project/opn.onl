@@ -430,10 +430,20 @@ const API_PREFIXES: &[&str] = &[
 /// generated codes and, worse, routed `POST /contact` into the relaxed 100 req/s
 /// redirect bucket (an email-flood vector).
 fn is_redirect_path(path: &str) -> bool {
+    if is_files_api_path(path) {
+        return false;
+    }
     match path.trim_start_matches('/').split('/').next() {
         Some(first) => !first.is_empty() && !API_PREFIXES.contains(&first),
         None => false,
     }
+}
+
+/// The file-sharing API: `/files/uploads`, `/files/uploads/{id}/complete` and
+/// `/files/usage`. Named exactly, not as a `files` prefix: `/files` alone is
+/// still the short code `files`, which may already exist.
+fn is_files_api_path(path: &str) -> bool {
+    path == "/files/usage" || path == "/files/uploads" || path.starts_with("/files/uploads/")
 }
 
 /// `POST /report` is the abuse-report API (and stays on the API buckets,
@@ -621,6 +631,13 @@ mod tests {
         assert!(!is_redirect_path("/admin/stats"));
         assert!(!is_redirect_path("/api/bio/someone"));
         assert!(!is_redirect_path("/health"));
+        // The file-sharing API is not a redirect; the code `files` still is.
+        assert!(!is_redirect_path("/files/uploads"));
+        assert!(!is_redirect_path("/files/uploads/12/complete"));
+        assert!(!is_redirect_path("/files/usage"));
+        assert!(is_redirect_path("/files"));
+        assert!(is_redirect_path("/files/preview"));
+        assert!(is_redirect_path("/files/verify"));
         // Root / empty is not a redirect.
         assert!(!is_redirect_path("/"));
     }

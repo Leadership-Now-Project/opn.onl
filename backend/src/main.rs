@@ -128,6 +128,14 @@ async fn main() {
     }
     spawn_backup_task(backup.clone(), ws_state.shutdown_watch());
 
+    // File sharing (optional): a private bucket for uploaded files, and the
+    // sweep that removes the files of deleted and expired links.
+    let files = utils::files::FileSharing::from_env().await;
+    match &files {
+        Some(files) => utils::files::spawn_cleanup_task(db.clone(), files.store.clone()),
+        None => tracing::info!("File sharing disabled (FILES_S3_BUCKET not set)"),
+    }
+
     let app_state = AppState {
         db,
         ws_state: Some(ws_state.clone()),
@@ -139,6 +147,7 @@ async fn main() {
             opn_onl_backend::utils::rate_limiter::RateLimiters::new(),
         ),
         require_email_verification,
+        files,
     };
 
     // Handles for the graceful-shutdown flush (so buffered clicks aren't lost on

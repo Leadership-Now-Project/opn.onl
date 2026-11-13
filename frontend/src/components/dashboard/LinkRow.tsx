@@ -2,13 +2,14 @@ import type { Ref } from 'react';
 import { Link } from 'react-router-dom';
 import {
     Copy, Trash2, BarChart2, QrCode, Lock, Clock, Edit2, Check,
-    Link2, Share2, Pin, CopyPlus, Eye,
+    Link2, Share2, Pin, CopyPlus, Eye, FileText,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { shortLinkBase } from '../../config/api';
 import Sparkline from '../Sparkline';
 import MiniStats from './MiniStats';
 import { pluralize } from '../../utils/plural';
+import { formatBytes } from '../../utils/fileSize';
 import { swatchColor } from './linkScope';
 import { clickCapReached, clickLimitLabel, formatBadgeDay, rowStatus } from './linkStatus';
 import type { LinkData, SparklineSeries } from './types';
@@ -141,27 +142,43 @@ export default function LinkRow({
                                 )}
                             </button>
                             <span className="text-faint" aria-hidden="true">→</span>
-                            <a
-                                href={link.original_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="truncate max-w-[300px] font-mono text-sm text-muted transition-colors hover:text-ink hover:underline"
-                                title={link.original_url}
-                            >
-                                {link.original_url.replace(/^https?:\/\//, '').substring(0, 50)}{link.original_url.length > 60 ? '...' : ''}
-                            </a>
-                            <button
-                                onClick={() => onCopySource(link)}
-                                className="rounded p-1 text-faint transition-colors hover:bg-line hover:text-ink"
-                                title="Copy source URL"
-                                aria-label={`Copy source URL for ${link.code}`}
-                            >
-                                {sourceCopied ? (
-                                    <Check className="h-4 w-4 text-success" />
-                                ) : (
-                                    <Link2 className="h-4 w-4" />
-                                )}
-                            </button>
+                            {link.file ? (
+                                // A file link has no destination URL: it
+                                // serves the uploaded file.
+                                <span
+                                    className="inline-flex min-w-0 max-w-[300px] items-center gap-1.5 text-sm text-muted"
+                                    title={link.file.filename}
+                                    data-file-link={link.id}
+                                >
+                                    <FileText className="h-4 w-4 shrink-0 text-primary-600" aria-label="File" />
+                                    <span className="truncate font-medium text-ink">{link.file.filename}</span>
+                                    <span className="shrink-0 text-xs text-faint">{formatBytes(link.file.size_bytes)}</span>
+                                </span>
+                            ) : (
+                                <>
+                                    <a
+                                        href={link.original_url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="truncate max-w-[300px] font-mono text-sm text-muted transition-colors hover:text-ink hover:underline"
+                                        title={link.original_url}
+                                    >
+                                        {link.original_url.replace(/^https?:\/\//, '').substring(0, 50)}{link.original_url.length > 60 ? '...' : ''}
+                                    </a>
+                                    <button
+                                        onClick={() => onCopySource(link)}
+                                        className="rounded p-1 text-faint transition-colors hover:bg-line hover:text-ink"
+                                        title="Copy source URL"
+                                        aria-label={`Copy source URL for ${link.code}`}
+                                    >
+                                        {sourceCopied ? (
+                                            <Check className="h-4 w-4 text-success" />
+                                        ) : (
+                                            <Link2 className="h-4 w-4" />
+                                        )}
+                                    </button>
+                                </>
+                            )}
                             {link.has_password && (
                                 <span className={neutralBadge}>
                                     <Lock className="h-3 w-3" />
@@ -250,14 +267,17 @@ export default function LinkRow({
                             </span>
                         </Link>
                         <div className="flex items-center gap-0.5">
-                            <button
-                                onClick={() => onPreview(link)}
-                                className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink"
-                                title="Preview destination"
-                                aria-label={`Preview destination for ${link.code}`}
-                            >
-                                <Eye className="h-4 w-4" />
-                            </button>
+                            {/* A file link has no page to preview. */}
+                            {!link.file && (
+                                <button
+                                    onClick={() => onPreview(link)}
+                                    className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink"
+                                    title="Preview destination"
+                                    aria-label={`Preview destination for ${link.code}`}
+                                >
+                                    <Eye className="h-4 w-4" />
+                                </button>
+                            )}
                             {!readOnly && (
                                 <>
                                     <button
@@ -268,15 +288,18 @@ export default function LinkRow({
                                     >
                                         <Pin className={`h-4 w-4 ${link.is_pinned ? 'fill-current' : ''}`} />
                                     </button>
-                                    <button
-                                        onClick={() => onClone(link)}
-                                        disabled={cloning}
-                                        className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink disabled:cursor-wait disabled:opacity-50"
-                                        title="Clone"
-                                        aria-label={`Clone link ${link.code}`}
-                                    >
-                                        <CopyPlus className="h-4 w-4" />
-                                    </button>
+                                    {/* One file, one link: the API refuses to clone a file link. */}
+                                    {!link.file && (
+                                        <button
+                                            onClick={() => onClone(link)}
+                                            disabled={cloning}
+                                            className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                                            title="Clone"
+                                            aria-label={`Clone link ${link.code}`}
+                                        >
+                                            <CopyPlus className="h-4 w-4" />
+                                        </button>
+                                    )}
                                 </>
                             )}
                             <button

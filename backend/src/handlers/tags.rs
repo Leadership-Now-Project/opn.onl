@@ -854,14 +854,14 @@ pub async fn get_links_by_tag(
 
     let base_url = crate::handlers::links::get_base_url();
     let api_url = crate::handlers::links::get_api_url();
-    let responses: Vec<crate::handlers::links::LinkResponse> = links_list
-        .into_iter()
+    let mut responses: Vec<crate::handlers::links::LinkResponse> = links_list
+        .iter()
         .map(|l| crate::handlers::links::LinkResponse {
             id: l.id,
             code: l.code.clone(),
             short_url: format!("{}/{}", base_url, l.code),
             api_url: format!("{}/{}", api_url, l.code),
-            original_url: l.original_url.clone(),
+            original_url: l.shown_url().to_string(),
             title: l.title.clone(),
             click_count: l.click_count,
             created_at: utc_rfc3339(l.created_at),
@@ -883,8 +883,12 @@ pub async fn get_links_by_tag(
             tags: tags_by_link.remove(&l.id).unwrap_or_default(),
             created_by: None,
             can_delete: None,
+            file: None,
         })
         .collect();
+    crate::handlers::links::attach_file_info(&state.db, &links_list, &mut responses)
+        .await
+        .map_err(|_| db_error())?;
 
     Ok(link_page(total, responses))
 }

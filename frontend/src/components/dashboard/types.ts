@@ -25,6 +25,14 @@ export interface LinkData {
     created_by?: { name: string | null; email: string } | null;
     /** False when the API would refuse this caller's delete. Only in an organization's list. */
     can_delete?: boolean;
+    /** The uploaded file a file link serves. `original_url` is then empty. */
+    file?: LinkFile | null;
+}
+
+export interface LinkFile {
+    filename: string;
+    size_bytes: number;
+    content_type: string;
 }
 
 export interface RoutingRule {
@@ -67,6 +75,8 @@ export interface AppSettings {
     link_in_bio_enabled: boolean;
     /** The shared organization every staff account joins, when the instance has one. */
     default_org?: { id: number; name: string } | null;
+    /** File sharing. Absent on a server with no storage for uploaded files. */
+    files?: { enabled: boolean; max_bytes: number } | null;
 }
 
 export type LinkSortBy = 'date' | 'clicks';

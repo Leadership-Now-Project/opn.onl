@@ -49,6 +49,10 @@ pub struct AppState {
     /// false; guards go through [`handlers::verification_satisfied`] so they
     /// cannot forget the switch. The stored `email_verified` column is not it.
     pub require_email_verification: bool,
+    /// File sharing: the bucket uploaded files live in, and the limits. `None`
+    /// until `FILES_S3_BUCKET` is set; the `/files` routes then answer 404
+    /// and nothing else behaves differently.
+    pub files: Option<utils::files::FileSharing>,
 }
 
 impl AppState {
@@ -68,6 +72,9 @@ impl AppState {
             // developer's `.env` must not flip the suite. Production reads the
             // variable once in `main`.
             require_email_verification: true,
+            // Off, as on an instance without a bucket. A test that needs file
+            // sharing sets this to a `MemoryFileStore`.
+            files: None,
         }
     }
 }
@@ -705,6 +712,15 @@ pub fn build_router(app_state: AppState) -> Router {
         // Registered before /api/bio/:username so the static path is unambiguous.
         .route("/api/bio/avatar", get(handlers::links::proxy_bio_avatar))
         .route("/api/bio/:username", get(handlers::bio::get_public_bio))
+        // File sharing. Always routed, like every documented operation; the
+        // handlers answer 404 to a signed-in caller while no bucket is
+        // configured (`AppState::files`).
+        .route("/files/uploads", post(handlers::files::start_upload))
+        .route(
+            "/files/uploads/:upload_id/complete",
+            post(handlers::files::complete_upload),
+        )
+        .route("/files/usage", get(handlers::files::get_usage))
         // Redirect route (must be last to not conflict with other routes)
         .route("/:code/verify", post(handlers::links::verify_link_password))
         .route("/:code/preview", get(handlers::links::preview_link))

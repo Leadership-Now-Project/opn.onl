@@ -51,6 +51,7 @@ mod email_case_folding_tests;
 mod email_domain_admin_signin_tests;
 mod email_verification_switch_tests;
 mod entity_tests;
+mod file_sharing_tests;
 mod first_admin_race_tests;
 mod folders_access_and_move_tests;
 mod folders_delete_tests;
