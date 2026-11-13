@@ -16,24 +16,24 @@ export default function Layout() {
     const isAdmin = safeLocalStorage.getItem('is_admin') === 'true';
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [userMenuOpen, setUserMenuOpen] = useState(false);
-    // An instance that signs people in with Google has no sign-up form: the
-    // account is made at the first sign-in. `null` until /auth/settings has
-    // answered. Only a signed-out visitor is offered "Sign up", so only then
-    // is it asked.
+    // The LNP dashboard signs people in with Google and has no sign-up form:
+    // the account is made at the first sign-in. `null` until /auth/settings
+    // has answered. Asked only in the LNP build, and only for a signed-out
+    // visitor (the one who is offered "Sign up"): a stock build makes no API
+    // request from its public pages, and its header is as upstream ships it.
     const [googleSignIn, setGoogleSignIn] = useState<boolean | null>(null);
     const signedOut = !token;
     useEffect(() => {
-        if (!signedOut) return;
+        if (!IS_LNP || !signedOut) return;
         let cancelled = false;
         void googleSignInClientId().then((clientId) => {
             if (!cancelled) setGoogleSignIn(clientId !== null);
         });
         return () => { cancelled = true; };
     }, [signedOut]);
-    // The LNP dashboard always signs in with Google, so it does not show the
-    // button for the moment before the settings arrive. Elsewhere it shows
-    // from the first paint, as it always has.
-    const signUpOffered = googleSignIn === null ? !IS_LNP : !googleSignIn;
+    // The LNP dashboard does not show the button for the moment before the
+    // settings arrive. A stock build always shows it.
+    const signUpOffered = !IS_LNP || googleSignIn === false;
     // The dashboard is full width; its header and footer line up with it.
     const pageWidth = token && location.pathname === '/dashboard' ? WIDE_PAGE : NARROW_PAGE;
 

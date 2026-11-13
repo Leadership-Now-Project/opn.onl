@@ -30,11 +30,13 @@ export default function Register() {
         }
     }, [navigate]);
 
-    // An instance that signs people in with Google makes the account at the
-    // first sign-in, so there is nothing to register here: go to the login
-    // page. `null` until /auth/settings has answered.
+    // The LNP dashboard signs people in with Google and makes the account at
+    // the first sign-in, so there is nothing to register here: go to the login
+    // page. `null` until /auth/settings has answered. Asked only in the LNP
+    // build: a stock build makes no API request before the form is submitted.
     const [googleSignIn, setGoogleSignIn] = useState<boolean | null>(null);
     useEffect(() => {
+        if (!IS_LNP) return;
         let cancelled = false;
         void googleSignInClientId().then((clientId) => {
             if (cancelled) return;
@@ -110,10 +112,9 @@ export default function Register() {
 
     const allRequirementsMet = passwordRequirements.every(req => req.test(password));
 
-    // No password form while the page is on its way to /login. The LNP
-    // dashboard always signs in with Google, so there it also waits for the
-    // settings instead of showing the form for a moment.
-    if (googleSignIn || (IS_LNP && googleSignIn === null)) return null;
+    // LNP build only: no password form while the settings are on their way,
+    // or once they say the page is going to /login.
+    if (IS_LNP && googleSignIn !== false) return null;
 
     // Show verification email sent screen
     if (registrationComplete) {

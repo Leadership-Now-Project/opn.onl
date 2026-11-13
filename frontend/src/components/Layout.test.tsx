@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, mockFetchResponse } from '../test/test-utils';
+import { render, screen, fireEvent } from '../test/test-utils';
 import { blockSiteStorage } from '../test/helpers';
 import ErrorBoundary from './ErrorBoundary';
 import Layout from './Layout';
@@ -169,11 +169,7 @@ describe('Layout Component', () => {
             // The build flag that used to send logout to Cloudflare Access's
             // logout address instead. It no longer means anything.
             vi.stubEnv('VITE_CF_ACCESS', 'true');
-            // Signed out again, the header asks /auth/settings whether to
-            // offer "Sign up". That read signs nobody in; anything else would.
-            const otherCalls = () => vi.mocked(global.fetch).mock.calls
-                .filter(([url]) => !String(url).endsWith('/auth/settings')).length;
-            const fetchCalls = otherCalls();
+            const fetchCalls = vi.mocked(global.fetch).mock.calls.length;
             try {
                 const { user } = render(<Layout />, { route: '/dashboard' });
 
@@ -184,59 +180,41 @@ describe('Layout Component', () => {
                 expect(localStorage.removeItem).toHaveBeenCalledWith('is_admin');
                 expect(window.location.pathname).toBe('/login');
                 // And no request that could sign the visitor straight back in.
-                expect(otherCalls()).toBe(fetchCalls);
+                expect(vi.mocked(global.fetch).mock.calls.length).toBe(fetchCalls);
             } finally {
                 vi.unstubAllEnvs();
             }
         });
     });
 
-    describe('Sign up on an instance that signs in with Google', () => {
-        const serveSettings = (settings: unknown) =>
-            vi.mocked(global.fetch).mockImplementation((() => mockFetchResponse(settings)) as any);
-        afterEach(() => {
-            vi.mocked(global.fetch).mockReset();
+    describe('Sign up in a stock build', () => {
+        // The Google sign-in lookup belongs to the LNP build
+        // (Layout.lnp.test.tsx). A stock build's public pages make no API
+        // request at all, signed out or in, whatever the server would say.
+        it('offers "Sign up" without asking the server anything', async () => {
+            vi.mocked(global.fetch).mockImplementation((() => Promise.resolve({
+                ok: true,
+                status: 200,
+                json: () => Promise.resolve({ google_client_id: 'client-1.apps.googleusercontent.com' }),
+            })) as any);
+            try {
+                render(<Layout />);
+                fireEvent.click(screen.getByRole('button', { name: /toggle menu/i }));
+                await new Promise((resolve) => setTimeout(resolve, 20));
+
+                expect(global.fetch).not.toHaveBeenCalled();
+                const signUp = screen.getAllByRole('link', { name: 'Sign up' });
+                expect(signUp).toHaveLength(2);
+                signUp.forEach(link => expect(link).toHaveAttribute('href', '/register'));
+            } finally {
+                vi.mocked(global.fetch).mockReset();
+            }
         });
 
-        it('offers only "Log in" in the header and the mobile menu', async () => {
-            serveSettings({ passkeys_enabled: true, google_client_id: 'client-1.apps.googleusercontent.com' });
-            render(<Layout />);
-            fireEvent.click(screen.getByRole('button', { name: /toggle menu/i }));
-
-            await waitFor(() => {
-                expect(screen.queryByRole('link', { name: 'Sign up' })).not.toBeInTheDocument();
-            });
-            const logIn = screen.getAllByRole('link', { name: 'Log in' });
-            expect(logIn).toHaveLength(2);
-            logIn.forEach(link => expect(link).toHaveAttribute('href', '/login'));
-            expect(global.fetch).toHaveBeenCalledWith(expect.stringMatching(/\/auth\/settings$/));
-        });
-
-        it('keeps "Sign up" when the settings carry no client id', async () => {
-            serveSettings({ passkeys_enabled: true });
-            render(<Layout />);
-            fireEvent.click(screen.getByRole('button', { name: /toggle menu/i }));
-
-            await waitFor(() => expect(global.fetch).toHaveBeenCalled());
-            await new Promise((resolve) => setTimeout(resolve, 0));
-            const signUp = screen.getAllByRole('link', { name: 'Sign up' });
-            expect(signUp).toHaveLength(2);
-            signUp.forEach(link => expect(link).toHaveAttribute('href', '/register'));
-        });
-
-        it('keeps "Sign up" when the settings cannot be read', async () => {
-            vi.mocked(global.fetch).mockRejectedValue(new Error('offline'));
-            render(<Layout />);
-
-            await waitFor(() => expect(global.fetch).toHaveBeenCalled());
-            await new Promise((resolve) => setTimeout(resolve, 0));
-            expect(screen.getByRole('link', { name: 'Sign up' })).toBeInTheDocument();
-        });
-
-        it('does not ask for the settings while signed in', () => {
+        it('asks the server nothing while signed in either', async () => {
             localStorage.setItem('token', 'test-token');
-            serveSettings({ google_client_id: 'client-1.apps.googleusercontent.com' });
             render(<Layout />);
+            await new Promise((resolve) => setTimeout(resolve, 20));
 
             expect(global.fetch).not.toHaveBeenCalled();
         });
