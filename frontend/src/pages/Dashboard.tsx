@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
     Plus, Download, X, ChevronLeft, ChevronRight,
@@ -21,6 +22,7 @@ import BulkImportModal, { type BulkReport } from '../components/dashboard/BulkIm
 import { parseBulkUrls, readBulkErrors } from '../components/dashboard/bulkImport';
 import Skeleton from '../components/dashboard/Skeleton';
 import CreateLinkForm from '../components/dashboard/CreateLinkForm';
+import CreateCard, { type CreateTab } from '../components/dashboard/CreateCard';
 import LinkFilters from '../components/dashboard/LinkFilters';
 import LinkRow from '../components/dashboard/LinkRow';
 import BulkActionBar, { SelectAllCheckbox } from '../components/dashboard/BulkActionBar';
@@ -50,6 +52,10 @@ const SPARKLINE_BATCH_SIZE = 80;
 const PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1000;
 const SEARCH_DEBOUNCE_MS = 300;
+// The page takes the width it is given: the list and the create card sit side
+// by side from `lg` up. The cap only stops lines growing without end on a very
+// wide screen.
+const pageClass = 'mx-auto w-full max-w-[120rem] px-4 sm:px-6 lg:px-8 py-10';
 
 // A link that was deleted elsewhere is refused with the same 403 as one the
 // user may not edit, so link ids cannot be probed. Either way the link is no
@@ -78,6 +84,7 @@ export default function Dashboard() {
     const [loading, setLoading] = useState(true);
     // Homepage shorten hands the URL over before the create form mounts.
     const [createInitialUrl, setCreateInitialUrl] = useState('');
+    const [createTab, setCreateTab] = useState<CreateTab>('links');
     const [searchQuery, setSearchQuery] = useState('');
     const [editingLink, setEditingLink] = useState<LinkData | null>(null);
     const [qrLink, setQrLink] = useState<LinkData | null>(null);
@@ -935,7 +942,7 @@ export default function Dashboard() {
 
     if (loading) {
         return (
-            <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+            <div className={pageClass}>
                 <SEO title="Dashboard" noIndex />
                 <div className="mb-8">
                     <div className="h-9 w-48 rounded bg-line2/70 animate-pulse" />
@@ -946,7 +953,7 @@ export default function Dashboard() {
     }
 
     return (
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+        <div className={pageClass}>
             <SEO title="Dashboard" noIndex />
 
             <AnimatePresence>
@@ -1057,24 +1064,36 @@ export default function Dashboard() {
                 </motion.div>
             )}
 
+            {/* One column below `lg`, create card first. From `lg` up the
+                list takes the left two thirds and the create card the right
+                third; the card comes first in the document either way.
+                `min-w-0` lets a long URL shrink its column and not the page. */}
+            <div className="lg:grid lg:grid-cols-3 lg:items-start lg:gap-8">
+            <div className="mb-8 min-w-0 lg:sticky lg:top-24 lg:col-start-3 lg:row-start-1 lg:mb-0">
             {/* Create Link Form */}
             {readOnly ? (
-                <p className="mb-8 rounded-2xl border border-dashed border-line2 bg-paper px-6 py-4 text-sm text-muted">
+                <p className="rounded-2xl border border-dashed border-line2 bg-paper px-6 py-4 text-sm text-muted">
                     You can view the links in {activeOrgName}. Editors and admins can add and change them.
                 </p>
             ) : (
-                <CreateLinkForm
-                    appSettings={appSettings}
-                    initialUrl={createInitialUrl}
-                    onCreated={() => { fetchLinks(); }}
-                    onError={setError}
-                    folders={folders}
-                    tags={tags}
-                    orgId={orgId}
-                    orgName={activeOrgName}
-                    onCatalogChanged={(kind) => { void loadScopedList(kind, orgId); }}
-                />
+                <CreateCard tab={createTab} onTabChange={setCreateTab}>
+                    <CreateLinkForm
+                        appSettings={appSettings}
+                        initialUrl={createInitialUrl}
+                        onCreated={() => { fetchLinks(); }}
+                        onError={setError}
+                        folders={folders}
+                        tags={tags}
+                        orgId={orgId}
+                        orgName={activeOrgName}
+                        onCatalogChanged={(kind) => { void loadScopedList(kind, orgId); }}
+                    />
+                </CreateCard>
             )}
+            </div>
+
+            <section aria-labelledby="shared-links-heading" className="min-w-0 lg:col-span-2 lg:col-start-1 lg:row-start-1">
+            <h2 id="shared-links-heading" className="font-display text-lg font-bold text-ink tracking-tight mb-4">Shared Links</h2>
 
             {/* Search and filter stay up with no links, so the first folder can be created here. */}
             <LinkFilters
@@ -1260,6 +1279,8 @@ export default function Dashboard() {
                         <button
                             type="button"
                             onClick={() => {
+                                // The field cannot take focus while its tab is hidden.
+                                flushSync(() => setCreateTab('links'));
                                 const input = document.querySelector('input[placeholder*="example.com"]') as HTMLInputElement;
                                 if (input) input.focus();
                             }}
@@ -1269,6 +1290,8 @@ export default function Dashboard() {
                         </button>
                     </motion.div>
                 )}
+            </div>
+            </section>
             </div>
         </div>
     );

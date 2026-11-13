@@ -93,7 +93,7 @@ export default function UtmBuilder({
             </button>
             {open && (
                 <div className="mt-3 space-y-3">
-                    <div className="grid sm:grid-cols-2 gap-3">
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-1 min-[1800px]:grid-cols-2 gap-3">
                         {FIELDS.map(([key, label]) => (
                             <div key={key}>
                                 <label htmlFor={`utm-${key}`} className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">

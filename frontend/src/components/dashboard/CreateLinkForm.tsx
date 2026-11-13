@@ -278,8 +278,10 @@ export default function CreateLinkForm({
     const limitHint = burnAfterReading ? burnCapHint(1) : CLICK_LIMIT_HINT;
 
     return (
-        <div className="rounded-2xl border border-line2 bg-surface p-6 shadow-subtle mb-8">
-            <h2 className="font-display text-lg font-bold text-ink tracking-tight mb-4">Create new link</h2>
+        // The card around this form, its heading and its tabs are CreateCard's.
+        // The card is a third of the page from `lg` up, so the paired fields
+        // go back to one column there until the page is wide enough for two.
+        <div>
             {orgId != null && orgName && (
                 <p className="mb-4 text-sm text-muted">Creating in {orgName}</p>
             )}
@@ -290,8 +292,11 @@ export default function CreateLinkForm({
                 {appSettings.custom_aliases_enabled && (
                     <>
                         <p className={labelClass}>Short link</p>
-                        <div className="flex items-stretch">
-                            <span className="inline-flex items-center rounded-l-lg border border-r-0 border-line2 bg-paper px-3 font-mono text-sm text-muted">
+                        {/* Between `lg` and `xl` the card is too narrow for the
+                            host and a usable alias field side by side, so
+                            the field goes under the host. */}
+                        <div className="flex items-stretch lg:max-xl:flex-col">
+                            <span className="inline-flex items-center rounded-l-lg border border-r-0 border-line2 bg-paper px-3 font-mono text-sm text-muted lg:max-xl:rounded-bl-none lg:max-xl:rounded-tr-lg lg:max-xl:border-b-0 lg:max-xl:border-r lg:max-xl:py-2">
                                 https://{shortLinkHost()}/
                             </span>
                             <label htmlFor="create-alias" className="sr-only">Custom alias</label>
@@ -300,7 +305,7 @@ export default function CreateLinkForm({
                                 type="text"
                                 placeholder={`alias (${appSettings.min_alias_length}-${appSettings.max_alias_length} chars)`}
                                 aria-describedby={aliasHint ? 'create-alias-hint' : 'create-alias-help'}
-                                className="min-w-0 flex-1 rounded-r-lg border border-line2 bg-surface px-4 py-2.5 font-mono text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint"
+                                className="min-w-0 flex-1 rounded-r-lg border border-line2 bg-surface px-4 py-2.5 font-mono text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint lg:max-xl:rounded-bl-lg lg:max-xl:rounded-tr-none"
                                 value={alias}
                                 onChange={(e) => setAlias(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))}
                                 minLength={appSettings.min_alias_length}
@@ -371,7 +376,9 @@ export default function CreateLinkForm({
                     <button
                         type="submit"
                         disabled={creating}
-                        className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-primary-600 px-8 py-2.5 font-semibold text-white transition-colors hover:bg-primary-700 disabled:opacity-70"
+                        // `ml-auto`: when the card is too narrow for both
+                        // buttons, Create wraps and stays at the right end.
+                        className="ml-auto inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-primary-600 px-6 py-2.5 font-semibold text-white transition-colors hover:bg-primary-700 disabled:opacity-70"
                     >
                         {creating ? (
                             <div className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
@@ -421,7 +428,7 @@ export default function CreateLinkForm({
                                     <CharCount length={notes.length} max={MAX_NOTES_CHARS} />
                                 </div>
 
-                                <div className="grid sm:grid-cols-2 gap-4">
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-1 min-[1800px]:grid-cols-2 gap-4">
                                     <div>
                                         <label htmlFor="create-folder" className={labelClass}>Folder</label>
                                         <select
@@ -486,7 +493,7 @@ export default function CreateLinkForm({
                                     </fieldset>
                                 </div>
 
-                                <div className="grid sm:grid-cols-2 gap-4">
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-1 min-[1800px]:grid-cols-2 gap-4">
                                     <div>
                                         <label htmlFor="create-password" className={iconLabelClass}>
                                             <Lock className="h-3.5 w-3.5" />
@@ -534,7 +541,7 @@ export default function CreateLinkForm({
                                     </div>
                                 </div>
 
-                                <div className="grid sm:grid-cols-2 gap-4">
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-1 min-[1800px]:grid-cols-2 gap-4">
                                     <div>
                                         <label htmlFor="create-starts" className={iconLabelClass}>
                                             <Calendar className="h-3.5 w-3.5" />
