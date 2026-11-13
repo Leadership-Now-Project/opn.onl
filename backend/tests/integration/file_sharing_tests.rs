@@ -469,7 +469,11 @@ async fn a_complete_that_loses_the_race_makes_no_second_link() {
             .await
     };
     let fast = async {
-        gate.arrived().await;
+        // A slow request that is answered before it asks the bucket leaves no
+        // gap to race in. Fail then, rather than wait for it forever.
+        tokio::time::timeout(Duration::from_secs(20), gate.arrived())
+            .await
+            .expect("the slow request never asked the bucket about its upload");
         let res = fast_app
             .post(&path)
             .authorization_bearer(&alice.token)
