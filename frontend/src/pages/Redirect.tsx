@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link as RouterLink } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { ExternalLink, ShieldCheck, ShieldAlert, ShieldQuestion, ArrowRight } from 'lucide-react';
 import { API_ENDPOINTS } from '../config/api';
 import SEO from '../components/SEO';
@@ -179,7 +180,7 @@ export default function Redirect() {
 
                             <div className="flex gap-3 pt-1">
                                 <RouterLink
-                                    to="/"
+                                    to="/" reloadDocument={IS_LNP}
                                     className="flex-1 text-center rounded-xl border border-slate-200 px-6 py-3 font-medium text-slate-600 hover:bg-slate-50 transition-colors"
                                 >
                                     Cancel

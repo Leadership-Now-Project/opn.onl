@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { Lock, Loader2, ArrowRight, ShieldAlert } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { API_ENDPOINTS } from '../config/api';
@@ -141,7 +142,7 @@ export default function PasswordPrompt() {
                             <p className="text-center text-sm text-slate-500">
                                 Don't know the password?{' '}
                                 <button 
-                                    onClick={() => navigate('/')}
+                                    onClick={() => (IS_LNP ? window.location.assign('/') : navigate('/'))}
                                     className="text-primary-600 hover:text-primary-700 font-medium"
                                 >
                                     Go to homepage

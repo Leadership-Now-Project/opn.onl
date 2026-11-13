@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { Home, Search, ArrowLeft } from 'lucide-react';
 import { Helmet } from 'react-helmet-async';
 
@@ -73,7 +74,7 @@ export default function NotFound() {
             className="flex flex-col sm:flex-row gap-4 justify-center"
           >
             <Link
-              to="/"
+              to="/" reloadDocument={IS_LNP}
               className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
               aria-label="Go to homepage"
             >

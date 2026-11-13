@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { motion } from 'framer-motion';
 import {
     Key, Shield, Download, Trash2,
@@ -377,7 +378,8 @@ export default function Settings() {
 
             safeLocalStorage.removeItem('token');
             forgetDriveToken();
-            navigate('/');
+            if (IS_LNP) window.location.assign('/');
+            else navigate('/');
         } catch (err) {
             setError(errorMessage(err));
         } finally {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link as RouterLink } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { motion } from 'framer-motion';
 import { ExternalLink, Lock, Clock, MousePointer, Globe, AlertTriangle, ArrowRight, EyeOff, ShieldCheck, ShieldAlert, ShieldQuestion } from 'lucide-react';
 import { API_ENDPOINTS, shortLinkHost } from '../config/api';
@@ -103,7 +104,7 @@ export default function Preview() {
                     <h1 className="text-2xl font-bold text-slate-900 mb-2">Link Not Found</h1>
                     <p className="text-slate-600 mb-6">This link doesn't exist or has been deleted.</p>
                     <RouterLink 
-                        to="/"
+                        to="/" reloadDocument={IS_LNP}
                         className="inline-flex items-center gap-2 bg-primary-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-primary-700"
                     >
                         Go Home

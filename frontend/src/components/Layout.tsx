@@ -79,19 +79,12 @@ export default function Layout() {
             <header className="sticky top-0 z-50 border-b border-line bg-surface/85 backdrop-blur-md">
                 <div className={pageWidth}>
                     <div className="h-16 flex items-center justify-between">
-                        {IS_LNP ? (
-                            // A full page load, not a client-side route: on the LNP
-                            // hosts nginx decides where "/" goes (the dashboard, or
-                            // the sign-in page behind it), and an in-app route would
-                            // show opn.onl's marketing page instead.
-                            <a href="/" className="transition-opacity hover:opacity-80">
-                                <Logo />
-                            </a>
-                        ) : (
-                            <Link to="/" className="transition-opacity hover:opacity-80">
-                                <Logo />
-                            </Link>
-                        )}
+                        {/* On the LNP hosts nginx decides where "/" goes (the dashboard, or the
+                            sign-in page behind it), so the link reloads the page there; an
+                            in-app route would show opn.onl's marketing page. */}
+                        <Link to="/" reloadDocument={IS_LNP} className="transition-opacity hover:opacity-80">
+                            <Logo />
+                        </Link>
 
                         <nav className="hidden md:flex items-center gap-8">
                             {navLinks.map(link => (
