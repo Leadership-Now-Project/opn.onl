@@ -4,7 +4,7 @@
 //! Access already signed in through: Access adds a signed JWT to every request it
 //! lets through, in the `Cf-Access-Jwt-Assertion` header. `POST /auth/cf-access`
 //! checks that token against the team's published keys, finds or creates the
-//! account for its email, and answers with the same [`AuthResponse`] as
+//! account for its email, and answers with the same `AuthResponse` as
 //! `/auth/login`, so every other auth path works unchanged.
 //!
 //! Off unless both `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set; the
@@ -16,35 +16,27 @@
 //! | `CF_ACCESS_AUD` | the Access application's AUD tag; several may be comma-separated |
 //! | `CF_ACCESS_ALLOWED_EMAIL_DOMAINS` | optional comma-separated list; when set, other addresses are refused even if Access let them through |
 //!
-//! Accounts created here are verified (Access vouched for the address) and get
-//! a random password nobody knows. The first live account becomes admin, as in
-//! `/auth/register`, under the same advisory lock.
+//! What happens once the token is accepted (which account, who is created, who
+//! becomes admin) is `verified_sign_in::sign_in_verified_email`, shared with
+//! `/auth/google`.
 
 use std::time::{Duration, Instant};
 
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use once_cell::sync::Lazy;
-use sea_orm::*;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::AppState;
-use crate::entity::users;
-use crate::handlers::auth::{AuthResponse, FIRST_ACCOUNT_ADMIN_LOCK};
 use crate::handlers::json_error;
-use crate::utils::email::generate_token;
-use crate::utils::email_domain_policy::{
-    ensure_email_domain_allowed, ensure_sign_in_domain_allowed, live_users_by_email,
-    normalize_email,
-};
+use crate::handlers::verified_sign_in::sign_in_verified_email;
+use crate::utils::email_domain_policy::normalize_email;
 use crate::utils::env::env_nonempty;
-use crate::utils::jwt::{create_jwt, hash_password};
 
 pub const ASSERTION_HEADER: &str = "cf-access-jwt-assertion";
 
@@ -263,110 +255,7 @@ pub async fn cf_access_login(State(state): State<AppState>, headers: HeaderMap) 
         }
     };
 
-    let user = match find_or_create_user(&state.db, &email).await {
-        Ok(user) => user,
-        Err((status, message)) => return json_error(status, message),
-    };
-    if user.is_disabled() {
-        return json_error(StatusCode::FORBIDDEN, "This account is disabled");
-    }
-
-    match create_jwt(user.id, &user.email, user.token_version) {
-        Ok(token) => (
-            StatusCode::OK,
-            Json(AuthResponse {
-                token,
-                user_id: user.id,
-                email: user.email,
-                email_verified: user.email_verified,
-                is_admin: user.is_admin,
-            }),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to create JWT: {}", e);
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create session",
-            )
-        }
-    }
-}
-
-/// A refusal from [`find_or_create_user`]: status and public message.
-type Refusal = (StatusCode, &'static str);
-
-fn database_error() -> Refusal {
-    (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-}
-
-async fn find_or_create_user(
-    db: &DatabaseConnection,
-    email: &str,
-) -> Result<users::Model, Refusal> {
-    if let Some(user) = live_users_by_email(email)
-        .one(db)
-        .await
-        .map_err(|_| database_error())?
-    {
-        ensure_sign_in_domain_allowed(db, email)
-            .await
-            .map_err(|r| (StatusCode::FORBIDDEN, r.public_message()))?;
-        return Ok(user);
-    }
-
-    ensure_email_domain_allowed(db, email)
-        .await
-        .map_err(|r| (StatusCode::FORBIDDEN, r.public_message()))?;
-    // Nobody knows this password; Access is the way in.
-    let password_hash = hash_password(&generate_token())
-        .await
-        .map_err(|_| database_error())?;
-
-    let txn = db.begin().await.map_err(|_| database_error())?;
-    // Same lock and count as `/auth/register`, so the two cannot both seat a
-    // first admin.
-    txn.execute(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock($1)",
-        [FIRST_ACCOUNT_ADMIN_LOCK.into()],
-    ))
-    .await
-    .map_err(|_| database_error())?;
-    // A concurrent first request may have created the account meanwhile.
-    if let Some(user) = live_users_by_email(email)
-        .one(&txn)
-        .await
-        .map_err(|_| database_error())?
-    {
-        let _ = txn.rollback().await;
-        return Ok(user);
-    }
-    let live_users = users::Entity::find()
-        .filter(users::Column::DeletedAt.is_null())
-        .count(&txn)
-        .await
-        .map_err(|_| database_error())?;
-
-    let user = users::ActiveModel {
-        email: Set(email.to_string()),
-        password_hash: Set(password_hash),
-        email_verified: Set(true),
-        is_admin: Set(live_users == 0),
-        ..Default::default()
-    }
-    .insert(&txn)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to create Cloudflare Access user: {}", e);
-        database_error()
-    })?;
-    txn.commit().await.map_err(|_| database_error())?;
-    tracing::info!(
-        user_id = user.id,
-        "Account created through Cloudflare Access"
-    );
-    Ok(user)
+    sign_in_verified_email(&state, &email, "Cloudflare Access").await
 }
 
 #[cfg(test)]

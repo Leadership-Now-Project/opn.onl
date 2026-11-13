@@ -3,7 +3,6 @@ import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Github, LogOut, Menu, X, User, Settings, LayoutDashboard, BarChart2, Shield, Users } from 'lucide-react';
 import Logo from './Logo';
 import { safeLocalStorage } from '../utils/storage';
-import { externalLogoutUrl } from '../config/api';
 import { IS_LNP, SOURCE_URL } from '../config/theme';
 
 export default function Layout() {
@@ -25,11 +24,6 @@ export default function Layout() {
         safeLocalStorage.removeItem('token');
         safeLocalStorage.removeItem('is_admin');
         closeMenus();
-        const external = externalLogoutUrl();
-        if (external) {
-            window.location.assign(external);
-            return;
-        }
         navigate('/login');
     };
 

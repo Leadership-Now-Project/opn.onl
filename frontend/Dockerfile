@@ -36,6 +36,45 @@ RUN set -e; \
     fi; \
     echo "CSP connect-src extra sources: '${CONNECT_SRC}'"
 
+# Google sign-in on the login page (src/pages/Login.tsx) needs Google Identity
+# Services in the CSP: its script, the endpoints that script calls, its frames
+# and its stylesheet. Only a deployment that signs people in with Google sets
+# CSP_GOOGLE_SIGN_IN=true; without it every placeholder becomes nothing and the
+# policy is exactly the stock one. Each placeholder sits directly before its
+# `;` in nginx.conf, so the leading space belongs to the value. Same guards as
+# above: fail if a placeholder is missing before or left over after.
+ARG CSP_GOOGLE_SIGN_IN
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    for NAME in SCRIPT STYLE CONNECT FRAME; do \
+        if ! grep -q "__CSP_GOOGLE_${NAME}__" "$CONF"; then \
+            echo "ERROR: __CSP_GOOGLE_${NAME}__ placeholder not found in nginx.conf"; \
+            exit 1; \
+        fi; \
+    done; \
+    if [ "$CSP_GOOGLE_SIGN_IN" = "true" ]; then \
+        G_SCRIPT=" https://accounts.google.com/gsi/client"; \
+        G_STYLE=" https://accounts.google.com/gsi/style"; \
+        G_CONNECT=" https://accounts.google.com/gsi/"; \
+        G_FRAME=" frame-src https://accounts.google.com/gsi/;"; \
+    elif [ -z "$CSP_GOOGLE_SIGN_IN" ] || [ "$CSP_GOOGLE_SIGN_IN" = "false" ]; then \
+        G_SCRIPT=""; G_STYLE=""; G_CONNECT=""; G_FRAME=""; \
+    else \
+        echo "ERROR: CSP_GOOGLE_SIGN_IN must be true, false or unset, not '$CSP_GOOGLE_SIGN_IN'"; \
+        exit 1; \
+    fi; \
+    sed -i \
+        -e "s#__CSP_GOOGLE_SCRIPT__#${G_SCRIPT}#g" \
+        -e "s#__CSP_GOOGLE_STYLE__#${G_STYLE}#g" \
+        -e "s#__CSP_GOOGLE_CONNECT__#${G_CONNECT}#g" \
+        -e "s#__CSP_GOOGLE_FRAME__#${G_FRAME}#g" \
+        "$CONF"; \
+    if grep -q '__CSP_GOOGLE_' "$CONF"; then \
+        echo "ERROR: a __CSP_GOOGLE_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP Google sign-in sources: '${G_SCRIPT}'"
+
 # Build stage - use full Node image for Puppeteer/Chromium support
 FROM node:22-slim AS builder
 
@@ -67,14 +106,11 @@ COPY . .
 # Set build-time environment variables (API URLs are baked in at build time)
 ARG VITE_API_URL
 ARG VITE_FRONTEND_URL
-# "true" on a build for an instance behind Cloudflare Access (see Login.tsx).
-ARG VITE_CF_ACCESS
 # "lnp" for the Leadership Now Project theme (themes/lnp.js, themes/lnp/public).
 ARG VITE_THEME
 
 ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_FRONTEND_URL=$VITE_FRONTEND_URL
-ENV VITE_CF_ACCESS=$VITE_CF_ACCESS
 ENV VITE_THEME=$VITE_THEME
 # A theme's own logo and icons replace the stock ones in public/.
 RUN if [ -n "$VITE_THEME" ] && [ -d "themes/$VITE_THEME/public" ]; then cp -r "themes/$VITE_THEME/public/." public/; fi

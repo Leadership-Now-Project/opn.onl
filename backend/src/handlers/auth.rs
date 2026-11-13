@@ -1709,6 +1709,11 @@ pub struct AppSettingsResponse {
     /// `LINK_EXPIRY_REMINDERS` is on and SMTP is configured. While it is false
     /// the account setting `notify_link_expiry` does nothing.
     pub link_expiry_reminders_enabled: bool,
+    /// The OAuth client id for "Sign in with Google". Present only when Google
+    /// sign-in is fully configured (`handlers/google_auth.rs`); the login page
+    /// then offers Google instead of the password form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_client_id: Option<String>,
 }
 
 /// Get app settings
@@ -1795,6 +1800,7 @@ pub async fn get_app_settings(State(state): State<AppState>) -> impl IntoRespons
             require_email_verification,
             email_configured,
             link_expiry_reminders_enabled,
+            google_client_id: crate::handlers::google_auth::configured_client_id(),
         }),
     )
 }

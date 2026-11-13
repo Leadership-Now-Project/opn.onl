@@ -589,6 +589,8 @@ const PUBLIC_OPERATIONS: &[(&str, &str)] = &[
     ("POST", "/auth/login"),
     // Authenticated by the Cloudflare Access header, not a bearer token.
     ("POST", "/auth/cf-access"),
+    // Authenticated by the Google authorization code in the body.
+    ("POST", "/auth/google"),
     ("POST", "/auth/verify-email"),
     ("POST", "/auth/forgot-password"),
     ("POST", "/auth/reset-password"),

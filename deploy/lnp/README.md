@@ -5,7 +5,7 @@ This fork of [ysalitrynskyi/opn.onl](https://github.com/ysalitrynskyi/opn.onl) r
 | Hostname | Container | Access |
 |---|---|---|
 | `ldr.now` | `frontend-public` (127.0.0.1:3101) | Public: short-link redirects, password and interstitial pages only |
-| `links.leadershipnowproject.com` | `frontend-admin` (127.0.0.1:3102) | Cloudflare Access, LNP staff Google accounts |
+| `links.leadershipnowproject.com` | `frontend-admin` (127.0.0.1:3102) | Sign in with Google on the login page; `leadershipnowproject.com` and `.org` accounts only |
 | `links-mcp.leadershipnowproject.com` | `mcp` (127.0.0.1:3104) | Cloudflare Access with Managed OAuth: the Claude connector |
 
 Each hostname proxies its own `/api/` to the single backend, so browser calls are always same-origin. On `ldr.now` only the redirect, verify and preview routes pass; the rest of `/api/` is 404 and dashboard pages redirect to the admin host.
@@ -14,9 +14,11 @@ Each hostname proxies its own `/api/` to the single backend, so browser calls ar
 
 Kept small so they carry across upstream releases:
 
-- `backend/src/handlers/cf_access.rs` (new): `POST /auth/cf-access` signs in the person Cloudflare Access authenticated, from the `Cf-Access-Jwt-Assertion` header. Off unless `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set. Registered in `handlers/mod.rs`, `lib.rs` and `openapi.rs`; `FIRST_ACCOUNT_ADMIN_LOCK` in `auth.rs` is `pub(crate)` so both sign-up paths share it.
-- `frontend/src/pages/Login.tsx`: a build with `VITE_CF_ACCESS=true` calls that endpoint on load. `frontend/src/config/api.ts` names the endpoint.
-- `frontend/nginx.conf` and `frontend/Dockerfile`: an `include /etc/nginx/site.d/*.conf;` point (empty in the stock image) and the `VITE_CF_ACCESS` build arg.
+- `backend/src/handlers/google_auth.rs` (new): `POST /auth/google` signs in a Google account from an allowed email domain. The login page sends the one-time code from Google's popup; the backend redeems it and checks the ID token. Off unless `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_ALLOWED_DOMAINS` are set. `GET /auth/settings` then carries `google_client_id`.
+- `backend/src/handlers/cf_access.rs` (new): `POST /auth/cf-access` signs in the person Cloudflare Access authenticated, from the `Cf-Access-Jwt-Assertion` header. Off unless `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set. Only the Claude connector uses it now.
+- `backend/src/handlers/verified_sign_in.rs` (new): what both of those do once the address is verified (find the account or create it, first account is admin), so they cannot drift. All three are registered in `handlers/mod.rs`, `lib.rs` and `openapi.rs`; `FIRST_ACCOUNT_ADMIN_LOCK` in `auth.rs` is `pub(crate)` so every sign-up path shares it.
+- `frontend/src/pages/Login.tsx`: when the settings carry `google_client_id`, the page shows "Sign in with Google" in place of the password form. `frontend/src/config/api.ts` names the endpoint.
+- `frontend/nginx.conf` and `frontend/Dockerfile`: an `include /etc/nginx/site.d/*.conf;` point (empty in the stock image), and the `CSP_GOOGLE_SIGN_IN` build arg, which adds Google's sign-in sources to the Content-Security-Policy. Only the dashboard image sets it; without it the policy is the stock one.
 - `frontend/themes/lnp.js` and `frontend/themes/lnp/public/` (new): the Leadership Now Project look (navy, grey, Plus Jakarta Sans, square corners, LNP logo and icons), applied only when the frontend is built with `VITE_THEME=lnp` (the dashboard image). `tailwind.config.js` merges it in; `src/index.css` takes its body colours and fonts from the config; `Logo.tsx` shows the LNP logo; the Dockerfile copies the theme's icons over the stock ones. `src/designTokens.lnp.test.ts` checks its colours for WCAG AA contrast.
 - `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only. `deploy/lnp/mcp/` is the Claude connector (below); it uses the published `opn-mcp` package unchanged.
 
@@ -40,6 +42,26 @@ On the server, in a copy of this folder:
 After changing a file in `nginx/`, restart that container (`docker compose restart frontend-public` or `frontend-admin`). `nginx -s reload` inside the container does not pick up the change, because the file is bind-mounted and replaced, not edited in place.
 
 The host's reverse proxy sends `ldr.now` to 127.0.0.1:3101 and `links.leadershipnowproject.com` to 127.0.0.1:3102. It must pass `Host`, `X-Forwarded-Proto: https` and Cloudflare's headers through unchanged (`FORCE_HTTPS` redirects anything that does not arrive as https).
+
+## Google sign-in
+
+The dashboard's login page has one button, "Sign in with Google". The backend accepts an account only if Google says its email is verified, the email is at `leadershipnowproject.com` or `leadershipnowproject.org`, and the account is a Google Workspace account of that same domain (the `hd` claim; `GOOGLE_REQUIRE_HD=false` drops this last check). Someone who already has an account keeps it, with their links: accounts are matched by email.
+
+Google Cloud, project `lnp-links`:
+
+- OAuth consent screen: user type **Internal**.
+- Credentials: an OAuth 2.0 client ID of type **Web application**, with the authorised JavaScript origin `https://links.leadershipnowproject.com`. No redirect URI is needed (the popup flow uses `postmessage`).
+- Put the client ID and secret in `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+
+On this host `nginx/admin.conf` refuses every other way to get a session (password sign-in, registration, password reset, passkeys, `/auth/cf-access`).
+
+Moving from Cloudflare Access to Google sign-in, in this order:
+
+1. Deploy the new backend and dashboard images, the new `nginx/admin.conf` and the `GOOGLE_*` settings together, while the Access application still protects the hostname. `admin.conf` goes with the new dashboard image: an older image signs in through `/api/auth/cf-access`, which the new file refuses.
+2. Through Access, open the dashboard and sign in with Google once with a `.com` account and once with a `.org` account. Check each sees its existing links.
+3. Only then remove the Access application from `links.leadershipnowproject.com`. Leave the connector's Access application (`links-mcp.…`) alone, and take the removed application's AUD tag out of `CF_ACCESS_AUD` so only the connector's is left.
+
+If a staff account is refused in step 2, the backend log says why (`Google sign-in refused: …`), without the address.
 
 ## Claude connector
 

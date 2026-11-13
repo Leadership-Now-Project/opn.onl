@@ -48,7 +48,7 @@ jobs:
             build_args: |
               VITE_API_URL=https://links.leadershipnowproject.com/api
               VITE_FRONTEND_URL=https://ldr.now
-              VITE_CF_ACCESS=true
+              CSP_GOOGLE_SIGN_IN=true
               VITE_THEME=lnp
           - image: opn-mcp-remote
             context: deploy/lnp/mcp

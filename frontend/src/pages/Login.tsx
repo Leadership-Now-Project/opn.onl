@@ -7,6 +7,101 @@ import SEO from '../components/SEO';
 import logger from '../utils/logger';
 import { SIGN_IN_NEEDS_STORAGE, safeLocalStorage } from '../utils/storage';
 
+// Google Identity Services, as far as this page uses it: the OAuth code flow in
+// a popup. https://developers.google.com/identity/oauth2/web/guides/use-code-model
+const GSI_SCRIPT_URL = 'https://accounts.google.com/gsi/client';
+
+interface GoogleCodeResponse { code?: string; error?: string }
+interface GoogleCodeClientConfig {
+    client_id: string;
+    scope: string;
+    ux_mode: 'popup';
+    callback: (response: GoogleCodeResponse) => void;
+    error_callback?: (error: { type?: string }) => void;
+}
+declare global {
+    interface Window {
+        google?: {
+            accounts: {
+                oauth2: {
+                    initCodeClient: (config: GoogleCodeClientConfig) => { requestCode: () => void };
+                };
+            };
+        };
+    }
+}
+
+const GOOGLE_ACCOUNT_REFUSED =
+    'This Google account is not allowed. Use your Leadership Now Project account.';
+const GOOGLE_FAILED = 'Google sign-in failed. Please try again.';
+
+let gsiScript: Promise<void> | null = null;
+
+/**
+ * Load Google's script once. Called only after /auth/settings named a client
+ * id: never from index.html and never while prerendering (no server answers
+ * there), so an instance without Google sign-in loads nothing from Google.
+ */
+function loadGsiScript(): Promise<void> {
+    if (window.google?.accounts?.oauth2) return Promise.resolve();
+    if (!gsiScript) {
+        gsiScript = new Promise<void>((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = GSI_SCRIPT_URL;
+            script.async = true;
+            script.onload = () => resolve();
+            script.onerror = () => {
+                // Let the next click try again.
+                gsiScript = null;
+                script.remove();
+                reject(new Error('Could not load Google sign-in. Check your connection and try again.'));
+            };
+            document.head.appendChild(script);
+        });
+    }
+    return gsiScript;
+}
+
+/** Open Google's popup and resolve with the one-time authorization code. */
+function requestGoogleCode(clientId: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+        const oauth2 = window.google?.accounts?.oauth2;
+        if (!oauth2) {
+            reject(new Error(GOOGLE_FAILED));
+            return;
+        }
+        oauth2.initCodeClient({
+            client_id: clientId,
+            scope: 'openid email profile',
+            ux_mode: 'popup',
+            callback: (response) => {
+                if (response.code) resolve(response.code);
+                else reject(new Error(response.error === 'access_denied'
+                    ? 'Google sign-in was cancelled.'
+                    : GOOGLE_FAILED));
+            },
+            error_callback: (error) => {
+                reject(new Error(
+                    error?.type === 'popup_closed' ? 'The Google window was closed before sign-in finished. Please try again.'
+                    : error?.type === 'popup_failed_to_open' ? 'Your browser blocked the Google window. Allow pop-ups for this site and try again.'
+                    : GOOGLE_FAILED,
+                ));
+            },
+        }).requestCode();
+    });
+}
+
+function GoogleMark() {
+    return (
+        <svg className="h-5 w-5" viewBox="0 0 48 48" aria-hidden="true">
+            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+        </svg>
+    );
+}
+
 export default function Login() {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -21,32 +116,19 @@ export default function Login() {
     // page is prerendered with no server to ask, and an instance that has them
     // (the default) should not see the button jump in once /auth/settings answers.
     const [passkeysEnabled, setPasskeysEnabled] = useState(true);
+    // Set once /auth/settings says the instance signs people in with Google;
+    // the page then offers only that.
+    const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+    const [googleLoading, setGoogleLoading] = useState(false);
     const navigate = useNavigate();
 
-    // Redirect to dashboard if already logged in. Otherwise, on a build for an
-    // instance behind Cloudflare Access (VITE_CF_ACCESS=true), sign in as the
-    // person Access already let through. If that fails the form below is used.
+    // Redirect to dashboard if already logged in. Nobody is signed in just by
+    // loading this page: after logging out, it waits for a click.
     useEffect(() => {
         const token = safeLocalStorage.getItem('token');
         if (token) {
             navigate('/dashboard', { replace: true });
-            return;
         }
-        if (import.meta.env.VITE_CF_ACCESS !== 'true') return;
-        let cancelled = false;
-        (async () => {
-            try {
-                const res = await fetch(API_ENDPOINTS.cfAccess, { method: 'POST' });
-                if (!res.ok) return;
-                const data = await res.json();
-                if (cancelled || !safeLocalStorage.setItem('token', data.token)) return;
-                safeLocalStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
-                navigate('/dashboard', { replace: true });
-            } catch {
-                // Not behind Access, or offline: the form below still works.
-            }
-        })();
-        return () => { cancelled = true; };
     }, [navigate]);
 
     useEffect(() => {
@@ -56,7 +138,11 @@ export default function Login() {
                 const res = await fetch(API_ENDPOINTS.appSettings);
                 if (!res.ok) return;
                 const settings = await res.json();
-                if (!cancelled && settings.passkeys_enabled === false) setPasskeysEnabled(false);
+                if (cancelled) return;
+                if (settings.passkeys_enabled === false) setPasskeysEnabled(false);
+                if (typeof settings.google_client_id === 'string' && settings.google_client_id) {
+                    setGoogleClientId(settings.google_client_id);
+                }
             } catch {
                 // Offline or an unreadable answer: keep the default. Signing in
                 // with a password does not depend on it.
@@ -96,6 +182,54 @@ export default function Login() {
             setError(err instanceof Error ? err.message : 'Login failed');
         } finally {
             setLoading(false);
+        }
+    };
+
+    // Fetch Google's script as soon as the instance says it uses Google, so the
+    // click below opens the popup at once (a popup opened after a slow load
+    // can be blocked). A failure here is retried, and reported, on click.
+    useEffect(() => {
+        if (googleClientId) loadGsiScript().catch(() => {});
+    }, [googleClientId]);
+
+    const handleGoogleLogin = async () => {
+        if (!googleClientId) return;
+        setGoogleLoading(true);
+        setError('');
+
+        try {
+            await loadGsiScript();
+            const code = await requestGoogleCode(googleClientId);
+
+            const res = await fetch(API_ENDPOINTS.googleLogin, {
+                method: 'POST',
+                // The server refuses a code that does not come with this header.
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XmlHttpRequest' },
+                body: JSON.stringify({ code }),
+            });
+
+            if (!res.ok) {
+                const message = await responseError(res, GOOGLE_FAILED);
+                // 403 is also a disabled account; that one keeps the server's words.
+                throw new Error(res.status === 403 && message !== 'This account is disabled'
+                    ? GOOGLE_ACCOUNT_REFUSED
+                    : message);
+            }
+            const data = await res.json();
+
+            if (!safeLocalStorage.setItem('token', data.token)) throw new Error(SIGN_IN_NEEDS_STORAGE);
+            safeLocalStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
+
+            if (data.email_verified === false && await emailVerificationRequired()) {
+                setNeedsVerification(true);
+                return;
+            }
+
+            navigate('/dashboard');
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : GOOGLE_FAILED);
+        } finally {
+            setGoogleLoading(false);
         }
     };
 
@@ -285,12 +419,38 @@ export default function Login() {
                 <div className="mb-8 text-center">
                     <p className="font-mono text-xs uppercase tracking-[0.2em] text-primary-600">Welcome back</p>
                     <h1 className="mt-3 font-display text-3xl font-extrabold tracking-tight text-ink">Sign in to opn.onl</h1>
+                    {!googleClientId && (
                     <p className="mt-2 text-sm text-muted">
                         New here?{' '}
                         <Link to="/register" className="font-medium text-primary-600 underline decoration-primary-300 underline-offset-2 hover:decoration-primary-600 hover:text-primary-700">Create an account</Link>
                     </p>
+                    )}
                 </div>
 
+                {googleClientId ? (
+                <div className="rounded-2xl border border-line bg-surface p-8 shadow-card">
+                    <button
+                        type="button"
+                        onClick={handleGoogleLogin}
+                        disabled={googleLoading}
+                        className="flex w-full items-center justify-center gap-3 rounded-xl border border-line2 bg-white px-4 py-3 font-semibold text-ink shadow-subtle transition-colors hover:border-primary-300 hover:bg-primary-50/50 disabled:opacity-70"
+                    >
+                        {googleLoading
+                            ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                            : <GoogleMark />}
+                        Sign in with Google
+                    </button>
+                    {error && (
+                        <motion.div
+                            initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
+                            role="alert" aria-live="polite"
+                            className="mt-5 rounded-xl border border-danger/30 bg-danger/5 px-3 py-2.5 text-sm text-danger"
+                        >
+                            {error}
+                        </motion.div>
+                    )}
+                </div>
+                ) : (
                 <div className="rounded-2xl border border-line bg-surface p-8 shadow-card">
                     {isPasskeySupported && passkeysEnabled && (
                         <>
@@ -362,6 +522,7 @@ export default function Login() {
                         </button>
                     </form>
                 </div>
+                )}
             </motion.div>
         </div>
     );

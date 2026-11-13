@@ -162,6 +162,31 @@ describe('Layout Component', () => {
         });
     });
 
+    describe('Logging out', () => {
+        it('clears the session and lands on /login without leaving the app', async () => {
+            localStorage.setItem('token', 'test-token');
+            localStorage.setItem('is_admin', 'true');
+            // The build flag that used to send logout to Cloudflare Access's
+            // logout address instead. It no longer means anything.
+            vi.stubEnv('VITE_CF_ACCESS', 'true');
+            const fetchCalls = vi.mocked(global.fetch).mock.calls.length;
+            try {
+                const { user } = render(<Layout />, { route: '/dashboard' });
+
+                await user.click(screen.getByRole('button', { name: 'Account menu' }));
+                await user.click(screen.getByRole('button', { name: /log out/i }));
+
+                expect(localStorage.removeItem).toHaveBeenCalledWith('token');
+                expect(localStorage.removeItem).toHaveBeenCalledWith('is_admin');
+                expect(window.location.pathname).toBe('/login');
+                // And no request that could sign the visitor straight back in.
+                expect(vi.mocked(global.fetch).mock.calls.length).toBe(fetchCalls);
+            } finally {
+                vi.unstubAllEnvs();
+            }
+        });
+    });
+
     describe('Accessibility', () => {
         it('makes "Skip to content" the first tab stop, pointing at the main region', async () => {
             const { user } = render(<Layout />);

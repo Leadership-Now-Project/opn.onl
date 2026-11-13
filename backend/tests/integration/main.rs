@@ -56,6 +56,7 @@ mod folders_access_and_move_tests;
 mod folders_delete_tests;
 mod folders_list_query_tests;
 mod geoip_tests;
+mod google_sign_in_tests;
 mod health_redis_tests;
 mod id_list_cap_tests;
 mod last_admin_delete_tests;

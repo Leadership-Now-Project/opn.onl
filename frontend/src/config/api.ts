@@ -15,15 +15,6 @@ export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:30
 export const shortLinkBase = (): string =>
     (import.meta.env.VITE_FRONTEND_URL || window.location.origin).replace(/\/+$/, '');
 
-/**
- * Where logging out has to go to end the session for real, or null when the
- * app's own logout is enough. Behind Cloudflare Access (VITE_CF_ACCESS=true)
- * the login page signs straight back in while the Access session lasts, so
- * logout must also end that session at Cloudflare's logout address.
- */
-export const externalLogoutUrl = (): string | null =>
-    import.meta.env.VITE_CF_ACCESS === 'true' ? '/cdn-cgi/access/logout' : null;
-
 /** shortLinkBase() without the scheme, for display: "links.example.org". */
 export const shortLinkHost = (): string => shortLinkBase().replace(/^https?:\/\//, '');
 
@@ -34,9 +25,9 @@ export const API_ENDPOINTS = {
     // Auth
     register: `${API_BASE_URL}/auth/register`,
     login: `${API_BASE_URL}/auth/login`,
-    // Sign-in as the person Cloudflare Access let through; 404 when the
-    // instance does not use it.
-    cfAccess: `${API_BASE_URL}/auth/cf-access`,
+    // Sign-in with a Google authorization code; 404 unless /auth/settings
+    // carries a google_client_id.
+    googleLogin: `${API_BASE_URL}/auth/google`,
     verifyEmail: `${API_BASE_URL}/auth/verify-email`,
     resendVerification: `${API_BASE_URL}/auth/resend-verification`,
     forgotPassword: `${API_BASE_URL}/auth/forgot-password`,

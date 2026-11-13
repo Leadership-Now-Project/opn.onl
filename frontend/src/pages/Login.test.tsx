@@ -87,35 +87,169 @@ describe('Login Page', () => {
     });
   });
 
-  it('does not ask Cloudflare Access unless the build turns it on', async () => {
-    render(<Login />);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(global.fetch).not.toHaveBeenCalledWith(
-      expect.stringContaining('/auth/cf-access'),
-      expect.anything()
-    );
-  });
+  describe('Google sign-in', () => {
+    const CLIENT_ID = 'client-1.apps.googleusercontent.com';
+    const googleButton = () => screen.queryByRole('button', { name: /sign in with google/i });
+    const gsiScripts = () => document.head.querySelectorAll('script[src*="accounts.google.com/gsi/client"]');
 
-  it('signs in through Cloudflare Access on a build that turns it on', async () => {
-    vi.stubEnv('VITE_CF_ACCESS', 'true');
-    try {
-      vi.mocked(global.fetch).mockResolvedValue(
-        mockFetchResponse({ token: mockToken, is_admin: true }) as any
-      );
+    // What Google's script would put on window, with a popup that answers
+    // through whichever callback the test picks.
+    let requestCode: ReturnType<typeof vi.fn>;
+    let popupAnswers: (config: {
+      callback: (r: { code?: string; error?: string }) => void;
+      error_callback?: (e: { type?: string }) => void;
+    }) => void;
+    let initCodeClient: ReturnType<typeof vi.fn>;
 
+    // Every request that is not /auth/settings, i.e. every sign-in attempt.
+    const signInCalls = () =>
+      vi.mocked(global.fetch).mock.calls.filter(([url]) => !String(url).includes('/auth/settings'));
+
+    const serve = (settings: unknown, google: () => unknown = () => mockFetchResponse({})) =>
+      vi.mocked(global.fetch).mockImplementation(((url: string) =>
+        String(url).includes('/auth/google') ? google() : mockFetchResponse(settings)) as any);
+
+    beforeEach(() => {
+      popupAnswers = (config) => config.callback({ code: '4/the-code' });
+      requestCode = vi.fn();
+      initCodeClient = vi.fn((config) => {
+        requestCode.mockImplementation(() => popupAnswers(config));
+        return { requestCode };
+      });
+      window.google = { accounts: { oauth2: { initCodeClient } } } as unknown as typeof window.google;
+    });
+
+    afterEach(() => {
+      delete window.google;
+      gsiScripts().forEach((s) => s.remove());
+    });
+
+    it('is not offered, and nothing is loaded from Google, when the instance has no client id', async () => {
+      delete window.google;
+      serve({ passkeys_enabled: true });
       render(<Login />);
 
       await waitFor(() => {
-        expect(global.fetch).toHaveBeenCalledWith(
-          expect.stringContaining('/auth/cf-access'),
-          expect.objectContaining({ method: 'POST' })
-        );
-        expect(localStorage.setItem).toHaveBeenCalledWith('token', mockToken);
-        expect(localStorage.setItem).toHaveBeenCalledWith('is_admin', 'true');
+        expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/auth/settings'));
       });
-    } finally {
-      vi.unstubAllEnvs();
-    }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(googleButton()).not.toBeInTheDocument();
+      expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+      expect(gsiScripts()).toHaveLength(0);
+    });
+
+    it('replaces the password form, its links and the passkey block when the instance has a client id', async () => {
+      Object.defineProperty(window, 'PublicKeyCredential', {
+        configurable: true,
+        value: class PublicKeyCredentialMock {},
+      });
+      serve({ passkeys_enabled: true, google_client_id: CLIENT_ID });
+      render(<Login />);
+
+      expect(await screen.findByRole('button', { name: /sign in with google/i })).toBeInTheDocument();
+      expect(screen.queryByLabelText(/email address/i)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /forgot/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /create an account/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /sign in with passkey/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^sign in$/i })).not.toBeInTheDocument();
+    });
+
+    it("loads Google's script only once the settings name a client id", async () => {
+      delete window.google;
+      serve({ google_client_id: CLIENT_ID });
+      expect(gsiScripts()).toHaveLength(0);
+      render(<Login />);
+
+      await screen.findByRole('button', { name: /sign in with google/i });
+      await waitFor(() => expect(gsiScripts()).toHaveLength(1));
+    });
+
+    it('signs nobody in on page load, with or without a client id', async () => {
+      serve({ google_client_id: CLIENT_ID }, () => mockFetchResponse({ token: mockToken, is_admin: true }));
+      render(<Login />);
+
+      await screen.findByRole('button', { name: /sign in with google/i });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(signInCalls()).toHaveLength(0);
+      expect(initCodeClient).not.toHaveBeenCalled();
+      expect(localStorage.setItem).not.toHaveBeenCalledWith('token', expect.anything());
+      expect(window.location.pathname).not.toBe('/dashboard');
+    });
+
+    it('posts the code from the popup, stores the session and opens the dashboard', async () => {
+      serve({ google_client_id: CLIENT_ID }, () =>
+        mockFetchResponse({ token: mockToken, email_verified: true, is_admin: true }));
+      const { user } = render(<Login />, { route: '/login' });
+
+      await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
+
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/dashboard');
+      });
+      expect(initCodeClient).toHaveBeenCalledWith(expect.objectContaining({
+        client_id: CLIENT_ID,
+        scope: 'openid email profile',
+        ux_mode: 'popup',
+      }));
+      expect(requestCode).toHaveBeenCalledTimes(1);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/auth/google'),
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ code: '4/the-code' }),
+          headers: expect.objectContaining({ 'X-Requested-With': 'XmlHttpRequest' }),
+        }),
+      );
+      expect(localStorage.setItem).toHaveBeenCalledWith('token', mockToken);
+      expect(localStorage.setItem).toHaveBeenCalledWith('is_admin', 'true');
+    });
+
+    it('tells a refused account to use its Leadership Now Project account', async () => {
+      serve({ google_client_id: CLIENT_ID }, () =>
+        mockFetchError('This Google account is not allowed', 403));
+      const { user } = render(<Login />, { route: '/login' });
+
+      await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'This Google account is not allowed. Use your Leadership Now Project account.',
+      );
+      expect(localStorage.setItem).not.toHaveBeenCalledWith('token', expect.anything());
+      expect(window.location.pathname).toBe('/login');
+    });
+
+    it("keeps the server's words for a disabled account", async () => {
+      serve({ google_client_id: CLIENT_ID }, () => mockFetchError('This account is disabled', 403));
+      const { user } = render(<Login />);
+
+      await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('This account is disabled');
+    });
+
+    it('says so when the Google window is closed, and sends nothing to the server', async () => {
+      popupAnswers = (config) => config.error_callback?.({ type: 'popup_closed' });
+      serve({ google_client_id: CLIENT_ID });
+      const { user } = render(<Login />);
+
+      const button = await screen.findByRole('button', { name: /sign in with google/i });
+      await user.click(button);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(/window was closed/i);
+      expect(signInCalls()).toHaveLength(0);
+      // Ready for another try.
+      expect(button).toBeEnabled();
+    });
+
+    it('shows a plain failure when the server cannot complete the sign-in', async () => {
+      serve({ google_client_id: CLIENT_ID }, () => mockFetchError('Could not reach Google; try again', 502));
+      const { user } = render(<Login />);
+
+      await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach Google; try again');
+    });
   });
 
   it('stores admin metadata on successful passkey login', async () => {

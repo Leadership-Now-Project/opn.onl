@@ -1,7 +1,7 @@
 # opn.onl for Leadership Now Project.
 #
 #   ldr.now                          -> frontend-public (127.0.0.1:3101), public
-#   links.leadershipnowproject.com   -> frontend-admin  (127.0.0.1:3102), Cloudflare Access
+#   links.leadershipnowproject.com   -> frontend-admin  (127.0.0.1:3102), Google sign-in in the app
 #   links-mcp.leadershipnowproject.com -> mcp           (127.0.0.1:3104), Cloudflare Access (Managed OAuth)
 #
 # Both frontends proxy their own /api/ to the one backend (see nginx/), so every
@@ -75,12 +75,20 @@ services:
       LOG_DIR: /app/logs
       LOG_MAX_FILES: "14"
       REDIS_URL: redis://redis:6379
-      # Sign-in through Cloudflare Access (backend/src/handlers/cf_access.rs).
+      # Dashboard sign-in: Google accounts from these domains only
+      # (backend/src/handlers/google_auth.rs). Off, and the login page shows no
+      # Google button, until the client id and secret are both set.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_ALLOWED_DOMAINS: ${GOOGLE_ALLOWED_DOMAINS:-leadershipnowproject.com,leadershipnowproject.org}
+      GOOGLE_REQUIRE_HD: ${GOOGLE_REQUIRE_HD:-}
+      # The Claude connector's sign-in, through Cloudflare Access
+      # (backend/src/handlers/cf_access.rs). The dashboard does not use it.
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:?set CF_ACCESS_TEAM_DOMAIN in .env}
       CF_ACCESS_AUD: ${CF_ACCESS_AUD:?set CF_ACCESS_AUD in .env}
       CF_ACCESS_ALLOWED_EMAIL_DOMAINS: leadershipnowproject.com,leadershipnowproject.org
-      # No SMTP: Access-created accounts are verified, and nobody signs in by
-      # password, so no mail is needed.
+      # No SMTP: accounts created by Google or Access sign-in are verified, and
+      # nobody signs in by password, so no mail is needed.
       REQUIRE_EMAIL_VERIFICATION: "false"
       LINK_EXPIRY_REMINDERS: "false"
       ALLOW_ANONYMOUS_LINKS: "false"
@@ -151,8 +159,8 @@ services:
 
   # Remote MCP server for Claude connectors (links-mcp.leadershipnowproject.com,
   # Cloudflare Access with Managed OAuth). It trades each request's Access
-  # assertion for a session at the backend's /auth/cf-access, so the Access
-  # application's AUD must also be listed in CF_ACCESS_AUD. See mcp/server.mjs.
+  # assertion for a session at the backend's /auth/cf-access, so its Access
+  # application's AUD must be listed in CF_ACCESS_AUD. See mcp/server.mjs.
   mcp:
     image: ghcr.io/leadership-now-project/opn-mcp-remote:${OPN_MCP_TAG:-${OPN_TAG}}
     restart: unless-stopped

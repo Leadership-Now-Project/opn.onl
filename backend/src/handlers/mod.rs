@@ -6,6 +6,7 @@ pub mod bio;
 pub mod cf_access;
 pub mod contact;
 pub mod folders;
+pub mod google_auth;
 pub mod link_access;
 pub mod links;
 pub mod organizations;
@@ -13,6 +14,7 @@ pub mod passkeys;
 pub mod preview_image;
 pub mod reports;
 pub mod tags;
+pub mod verified_sign_in;
 pub mod websocket;
 
 use axum::{

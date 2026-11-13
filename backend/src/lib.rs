@@ -418,6 +418,7 @@ pub fn build_router(app_state: AppState) -> Router {
             "/auth/cf-access",
             post(handlers::cf_access::cf_access_login),
         )
+        .route("/auth/google", post(handlers::google_auth::google_login))
         .route("/auth/verify-email", post(handlers::auth::verify_email))
         .route(
             "/auth/resend-verification",
