@@ -4,11 +4,11 @@ This fork of [ysalitrynskyi/opn.onl](https://github.com/ysalitrynskyi/opn.onl) r
 
 | Hostname | Container | Access |
 |---|---|---|
-| `ldr.now` | `frontend-public` (127.0.0.1:3101) | Public: short-link redirects, password and interstitial pages only |
+| `ldr.now` | `frontend-public` (127.0.0.1:3101) | Public: short-link redirects, the password and interstitial pages, and the Secure View viewer |
 | `links.leadershipnowproject.com` | `frontend-admin` (127.0.0.1:3102) | Sign in with Google on the login page; `leadershipnowproject.com` and `.org` accounts only |
 | `links-mcp.leadershipnowproject.com` | `mcp` (127.0.0.1:3104) | Cloudflare Access with Managed OAuth: the Claude connector |
 
-Each hostname proxies its own `/api/` to the single backend, so browser calls are always same-origin. On `ldr.now` only the redirect, verify and preview routes pass; the rest of `/api/` is 404 and dashboard pages redirect to the admin host.
+Each hostname proxies its own `/api/` to the single backend, so browser calls are always same-origin. On `ldr.now` only the redirect, verify and preview routes and the Secure View viewer's two calls pass; the rest of `/api/` is 404 and dashboard pages redirect to the admin host.
 
 ## Changes from upstream
 
@@ -23,6 +23,7 @@ Kept small so they carry across upstream releases:
 - `frontend/nginx.conf` and `frontend/Dockerfile`: an `include /etc/nginx/site.d/*.conf;` point (empty in the stock image), and the `CSP_GOOGLE_SIGN_IN` build arg, which adds Google's sign-in sources to the Content-Security-Policy. Only the dashboard image sets it; without it the policy is the stock one.
 - `frontend/themes/lnp.js` and `frontend/themes/lnp/public/` (new): the Leadership Now Project look (navy, grey, Plus Jakarta Sans, square corners, LNP logo and icons), applied only when the frontend is built with `VITE_THEME=lnp` (the dashboard image). `tailwind.config.js` merges it in; `src/index.css` takes its body colours and fonts from the config; `Logo.tsx` shows the LNP logo; the Dockerfile copies the theme's icons over the stock ones. `src/designTokens.lnp.test.ts` checks its colours for WCAG AA contrast.
 - File sharing (below, "File sharing"): `backend/src/utils/files/` (the `FileStore` trait, its S3 and in-memory implementations, how a file is served, the sweep), `backend/src/handlers/files.rs` (`/files/uploads`, `/files/uploads/{id}/complete`, `/files/usage`), the `link_files` table, and `links.rs`, where `POST /links` and completing an upload share `insert_link` and `GET /{code}` signs a file link's address. A file link is a link whose `original_url` is the marker `opn-file:<id>`; the API shows it as an empty URL plus a `file` object. Frontend: `CreateFilesTab.tsx`, `AliasField.tsx` (the alias control, taken out of `CreateLinkForm.tsx` so both tabs use it), and the file row in `LinkRow.tsx`. `frontend/Dockerfile` takes `CSP_FILES_UPLOAD_ORIGIN`. Off unless `FILES_S3_BUCKET` is set; the `/files` routes answer 404 then.
+- Secure View (below, "Secure View"): `backend/src/utils/secure_view.rs` (the ticket and view token, the protected copy of a PDF, where the viewer's bytes come from), `backend/src/handlers/secure_view.rs` (`PUT /links/{id}/secure-view`, `POST /{code}/view`, `GET /{code}/view/file`), two columns on `link_files`, `click_events.viewer_email`, and `get`/`put` on the `FileStore` trait. `GET /{code}` sends a Secure View link to the viewer instead of signing an address. Frontend: `src/pages/SecureView.tsx` and `src/components/viewer/` (the viewer, with PDF.js), `SecureViewSwitch.tsx`, and `VITE_PUBLIC_LINKS_ONLY` in `Layout.tsx`. New dependencies: `lopdf` (backend) and `pdfjs-dist` (frontend). Does nothing unless file sharing is on.
 - Google Drive links (below, "Google Drive picker"): `frontend/src/utils/googleDrive.ts` (the Drive token, Google's picker, the two Drive calls), `DriveFilePanel.tsx` (the "Google Drive Files" button and its confirmation panel) and the Drive row in `LinkRow.tsx`. Backend: `utils/drive.rs`, the `link_drive_files` table, an optional `drive_file` on `POST /links`, `drive` on every link answer, and `drive` in `GET /auth/settings`. A Drive link is an ordinary URL link to the file's address in Drive. `frontend/Dockerfile` takes `CSP_GOOGLE_DRIVE_PICKER`. Off unless `GOOGLE_PICKER_API_KEY` and `GOOGLE_PICKER_APP_ID` are set.
 - `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only. `deploy/lnp/mcp/` is the Claude connector (below); it uses the published `opn-mcp` package unchanged.
 
@@ -165,6 +166,37 @@ The dashboard's Content-Security-Policy must allow the upload. Set the repositor
 Turning it on, in this order: create the bucket (steps 1 to 4), set the repository variable, build and deploy an image tag, then add the `FILES_*` settings to `.env` and `docker compose up -d`. Check with one small PDF and one `.html` file: the PDF opens in the browser, the HTML file downloads.
 
 To turn it off, blank `FILES_S3_BUCKET`. Existing file links then answer "This file is no longer available" and their files stay in the bucket until it is set again.
+
+## Secure View
+
+A switch on an uploaded file's link, "Secure View Share", off by default. It is on the Files tab when uploading and in the link's edit dialog afterwards. With it on, `https://ldr.now/<code>` does not hand over the file: it opens a viewer that asks the visitor for an email address and then shows the document. With it off the link behaves as in "File sharing" above. It needs file sharing to be on, and it works for the files a browser can show: PDF, PNG, JPEG, GIF and WebP. For anything else the switch is greyed out.
+
+These are deterrents, not locks. A visitor can still photograph or screenshot the screen, and someone technical can still get the bytes their own browser was sent. What the viewer does:
+
+- no download, print or open button; right-click, text selection, drag, copy, Ctrl/Cmd+P and Ctrl/Cmd+S do nothing, and printing the page prints nothing;
+- the visitor's email and the date and time (UTC) are drawn across every page, in the page itself and again on top of it;
+- the document blurs when the window is not the one in front;
+- a PDF is drawn page by page with no text in the page, so there is nothing to select or search.
+
+What the server guarantees:
+
+- The file is reached only after every check the link has (deleted, expired, scheduled, password, click limit) and an email. The checks run when the link is opened and again when the email is given.
+- No address of the bucket is ever sent for a Secure View link. The viewer gets the bytes from the app server, which reads them from the bucket.
+- Opening the link gives the visitor a ticket that works for 15 minutes; giving an email trades it for a token that fetches the file for 5 minutes. Neither is ever in an address sent to a server: the ticket travels in the part of the address after `#`, which browsers keep to themselves, and the token in a request header. Changing or removing the link's password ends both at once.
+- The click is counted, and a one-time or click-limited link is used up, when the email is given: not by opening the link, and not by a chat app drawing a preview.
+- A visitor may type any address. It is not verified.
+
+**Who sees the emails.** The link's creator, and the owners and admins of the organization (and an instance admin), in the link's analytics under "Recent clicks". Other members see the views without the addresses. The addresses are erased with the rest of a click's visitor data: after the retention window (13 months by default), and when the creator's account is deleted.
+
+**The protected copy.** When Secure View is switched on for a PDF of at most 50 MB (`SECURE_VIEW_PROTECT_MAX_BYTES`), the server makes a second copy of it marked "no printing, no copying, no changes" (AES-256, opens without a password) and the viewer is given that one. This is best effort: a PDF that is larger, damaged, not quite to the standard or already encrypted gets no copy and is shown from the original, with a line in the backend log (`Secure View: file … could not be given a protected copy`). The copy is made in the background a moment after switching on. It is deleted with the original (link deleted or expired, account or organization deleted) and when Secure View is switched off.
+
+Nothing to set up beyond file sharing. Three things to know when deploying it:
+
+- **Images.** `lnp-images.yml` builds the public image with `VITE_THEME=lnp` and `VITE_PUBLIC_LINKS_ONLY=true`, so the viewer, the password page and the interstitial carry the LNP look and a header with the logo alone. Deploy the backend, both frontend images and `nginx/public.conf` together: the viewer's two calls (`/api/<code>/view`, `/api/<code>/view/file`) are allowed by the new `public.conf`, and an older one answers them 404.
+- **The file passes through the app server and Cloudflare** to the visitor (an ordinary file link does not). `public.conf` passes it straight through with a 5 minute timeout. Nothing in the app caches it (`Cache-Control: no-store`).
+- **The bucket policy is unchanged**: the backend already has `s3:GetObject` and `s3:PutObject`. No CORS rule is needed, because the browser never talks to the bucket.
+
+Check it with one PDF: switch Secure View on, open the link in a private window, give an address, see the watermark, and find the address under the link's analytics.
 
 ## Google Drive picker
 

@@ -11,6 +11,12 @@ name: LNP images
 # Content-Security-Policy allows uploads to it; while the variable is unset
 # the policy is the stock one and the Files tab cannot upload.
 #
+# The public image (ldr.now) carries the LNP theme too, for the pages a
+# visitor sees: the password page, the interstitial and the Secure View viewer.
+# VITE_PUBLIC_LINKS_ONLY=true takes the sign-in links out of its header: nobody
+# signs in on that host. Its Content-Security-Policy is the stock one; the
+# viewer needs nothing added to it.
+#
 # The dashboard image's policy also allows Google's file picker and the Drive
 # API (CSP_GOOGLE_DRIVE_PICKER), for "Google Drive Files" on the Files tab.
 
@@ -51,6 +57,8 @@ jobs:
             build_args: |
               VITE_API_URL=https://ldr.now/api
               VITE_FRONTEND_URL=https://ldr.now
+              VITE_THEME=lnp
+              VITE_PUBLIC_LINKS_ONLY=true
           - image: opn-frontend-admin
             context: frontend
             build_args: |
