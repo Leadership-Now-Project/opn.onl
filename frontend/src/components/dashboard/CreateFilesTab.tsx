@@ -14,9 +14,11 @@ import { formatBytes } from '../../utils/fileSize';
 import { localIsoDate } from '../../utils/localIsoDate';
 import { pluralize } from '../../utils/plural';
 import { putFile, UploadCancelled } from '../../utils/uploadFile';
+import { SECURE_VIEW_NOT_ELIGIBLE, secureViewEligible } from '../../utils/secureView';
 import AliasField from './AliasField';
 import { aliasProblem } from './aliasCheck';
 import DriveFilePanel from './DriveFilePanel';
+import SecureViewSwitch from './SecureViewSwitch';
 import type { AppSettings } from './types';
 
 interface CreateFilesTabProps {
@@ -61,6 +63,8 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
     const [title, setTitle] = useState('');
     const [titleTouched, setTitleTouched] = useState(false);
     const [expiresAt, setExpiresAt] = useState('');
+    // Off unless the person turns it on, and off again for every new file.
+    const [secureView, setSecureView] = useState(false);
     const [phase, setPhase] = useState<Phase>('idle');
     const [progress, setProgress] = useState(0);
     const [error, setError] = useState('');
@@ -126,6 +130,7 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
     const choose = (chosen: File | null) => {
         if (busy) return;
         setFile(chosen);
+        setSecureView(false);
         setError('');
         setSharedUrl('');
         setProgress(0);
@@ -186,6 +191,7 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
             if (title.trim()) body.title = title.trim();
             if (expiration) body.expires_at = expiration;
             if (orgId != null) body.org_id = orgId;
+            if (secureView && canSecureView) body.secure_view = true;
             const completed = await authFetch(API_ENDPOINTS.fileUploadComplete(target.upload_id), {
                 method: 'POST',
                 body: JSON.stringify(body),
@@ -201,6 +207,7 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
             setTitle('');
             setTitleTouched(false);
             setExpiresAt('');
+            setSecureView(false);
             if (picker.current) picker.current.value = '';
             setUsageAttempt(n => n + 1);
             onCreated();
@@ -218,6 +225,13 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
     };
 
     const percent = Math.round(progress * 100);
+    // The same rule the server applies when the upload is completed.
+    const canSecureView = file !== null && !fileProblem && secureViewEligible(file.name, file.type);
+    const secureViewReason = !file
+        ? 'Choose a file first.'
+        : canSecureView || fileProblem
+            ? ''
+            : SECURE_VIEW_NOT_ELIGIBLE;
 
     return (
         <div>
@@ -317,6 +331,14 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
                         </div>
                     </div>
                 )}
+
+                <SecureViewSwitch
+                    id="file-secure-view"
+                    checked={secureView && canSecureView}
+                    onChange={setSecureView}
+                    disabled={!canSecureView || busy}
+                    reason={secureViewReason}
+                />
 
                 {busy && (
                     <div className="mt-4">

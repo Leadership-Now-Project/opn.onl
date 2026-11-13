@@ -4,7 +4,7 @@ import { Github, LogOut, Menu, X, User, Settings, LayoutDashboard, BarChart2, Sh
 import Logo from './Logo';
 import { safeLocalStorage } from '../utils/storage';
 import { forgetDriveToken } from '../utils/driveToken';
-import { IS_LNP, SOURCE_URL } from '../config/theme';
+import { IS_LNP, PUBLIC_LINKS_ONLY, SOURCE_URL } from '../config/theme';
 import { googleSignInClientId } from '../config/api';
 import { NARROW_PAGE, WIDE_PAGE } from './pageWidth';
 
@@ -25,7 +25,7 @@ export default function Layout() {
     const [googleSignIn, setGoogleSignIn] = useState<boolean | null>(null);
     const signedOut = !token;
     useEffect(() => {
-        if (!IS_LNP || !signedOut) return;
+        if (!IS_LNP || !signedOut || PUBLIC_LINKS_ONLY) return;
         let cancelled = false;
         void googleSignInClientId().then((clientId) => {
             if (!cancelled) setGoogleSignIn(clientId !== null);
@@ -59,7 +59,8 @@ export default function Layout() {
     };
 
     // The LNP dashboard is a staff tool: no links to opn.onl's own marketing pages.
-    const navLinks = IS_LNP ? [] : [
+    // Nor does a host that only serves short links have any of them.
+    const navLinks = IS_LNP || PUBLIC_LINKS_ONLY ? [] : [
         { href: '/features', label: 'Features' },
         { href: '/pricing', label: 'Pricing' },
         { href: '/developers', label: 'Developers' },
@@ -82,7 +83,7 @@ export default function Layout() {
                         {/* On the LNP hosts nginx decides where "/" goes (the dashboard, or the
                             sign-in page behind it), so the link reloads the page there; an
                             in-app route would show opn.onl's marketing page. */}
-                        <Link to="/" reloadDocument={IS_LNP} className="transition-opacity hover:opacity-80">
+                        <Link to="/" reloadDocument={IS_LNP || PUBLIC_LINKS_ONLY} className="transition-opacity hover:opacity-80">
                             <Logo />
                         </Link>
 
@@ -102,6 +103,9 @@ export default function Layout() {
                             ))}
                         </nav>
 
+                        {/* Nobody signs in on a host that only serves short
+                            links: no account area, and no menu to hold one. */}
+                        {!PUBLIC_LINKS_ONLY && (<>
                         <div className="hidden md:flex items-center gap-5">
                             {!IS_LNP && (
                                 <a
@@ -187,6 +191,7 @@ export default function Layout() {
                         >
                             {mobileMenuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
                         </button>
+                        </>)}
                     </div>
                 </div>
 

@@ -2,7 +2,7 @@ import type { Ref } from 'react';
 import { Link } from 'react-router-dom';
 import {
     Copy, Trash2, BarChart2, QrCode, Lock, Clock, Edit2, Check,
-    Link2, Share2, Pin, CopyPlus, Eye, FileText,
+    Link2, Share2, Pin, CopyPlus, Eye, FileText, FileLock2,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { shortLinkBase } from '../../config/api';
@@ -196,6 +196,15 @@ export default function LinkRow({
                                         )}
                                     </button>
                                 </>
+                            )}
+                            {link.file?.secure_view && (
+                                <span
+                                    className={neutralBadge}
+                                    title="Opens in a viewer that asks for an email. The file is not handed over."
+                                >
+                                    <FileLock2 className="h-3 w-3" />
+                                    Secure View
+                                </span>
                             )}
                             {link.has_password && (
                                 <span className={neutralBadge}>

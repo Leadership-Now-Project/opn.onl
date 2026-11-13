@@ -180,10 +180,15 @@ ARG VITE_API_URL
 ARG VITE_FRONTEND_URL
 # "lnp" for the Leadership Now Project theme (themes/lnp.js, themes/lnp/public).
 ARG VITE_THEME
+# "true" for a host that serves only what a short link's visitor sees (the
+# password page, the interstitial, the Secure View viewer): the header is then
+# the logo alone, with no sign-in links and no account menu.
+ARG VITE_PUBLIC_LINKS_ONLY
 
 ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_FRONTEND_URL=$VITE_FRONTEND_URL
 ENV VITE_THEME=$VITE_THEME
+ENV VITE_PUBLIC_LINKS_ONLY=$VITE_PUBLIC_LINKS_ONLY
 # A theme's own logo and icons replace the stock ones in public/.
 RUN if [ -n "$VITE_THEME" ] && [ -d "themes/$VITE_THEME/public" ]; then cp -r "themes/$VITE_THEME/public/." public/; fi
 

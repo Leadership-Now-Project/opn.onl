@@ -40,6 +40,10 @@ export interface LinkFile {
     filename: string;
     size_bytes: number;
     content_type: string;
+    /** Secure View is on: the link opens the viewer instead of handing the file over. */
+    secure_view?: boolean;
+    /** Whether Secure View can be switched on for this file (PDF and the four image types). */
+    secure_view_eligible?: boolean;
 }
 
 export interface RoutingRule {

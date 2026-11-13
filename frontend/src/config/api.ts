@@ -91,6 +91,12 @@ export const API_ENDPOINTS = {
     fileUploads: `${API_BASE_URL}/files/uploads`,
     fileUploadComplete: (uploadId: number) => `${API_BASE_URL}/files/uploads/${uploadId}/complete`,
     fileUsage: `${API_BASE_URL}/files/usage`,
+    // Secure View: switch it on or off for a file link.
+    linkSecureView: (id: number) => `${API_BASE_URL}/links/${id}/secure-view`,
+    // Secure View's viewer page: trade the ticket and an email for a view
+    // token, then fetch the file with that token in a header.
+    viewOpen: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/view`,
+    viewFile: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/view/file`,
     
     // Analytics
     dashboardStats: `${API_BASE_URL}/analytics/dashboard`,
@@ -529,6 +535,8 @@ export interface RecentClick {
     browser?: string;
     os?: string;
     referer?: string;
+    /** The email a Secure View visitor gave. Only sent to the link's creator and its organization's admins. */
+    viewer_email?: string;
 }
 
 export interface GeoPoint {

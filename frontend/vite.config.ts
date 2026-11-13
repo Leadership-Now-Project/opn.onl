@@ -3,7 +3,7 @@ import type { ResolvedConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import Prerenderer from '@prerenderer/rollup-plugin'
 import PuppeteerRenderer from '@prerenderer/renderer-puppeteer'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { normalizeSiteUrl } from './src/utils/siteUrl.ts'
 import { buildSitemap, sitemapPages, withSitemapDirective } from './src/utils/sitemap.ts'
@@ -22,6 +22,22 @@ const PRERENDER_ROUTES = [
   '/developers',
   '/login',
   '/register',
+]
+
+// What PDF.js (the Secure View viewer) fetches on demand, by a fixed name under
+// one folder, so these cannot be hashed assets. Copied from the package into
+// dist/pdfjs/ at build time:
+//   wasm/            the JavaScript decoders for JBIG2 and JPEG 2000 images.
+//                    Only the `_nowasm_fallback.js` files: the viewer runs with
+//                    `useWasm: false` (see src/components/viewer/pdfDocument.ts),
+//                    so the .wasm files would never be asked for.
+//   cmaps/           character maps for CJK text
+//   standard_fonts/  the 14 standard fonts, for a PDF that does not embed them
+// Nothing here is loaded until a document needs it.
+const PDFJS_RESOURCES: Array<[folder: string, wanted: (name: string) => boolean]> = [
+  ['wasm', (name) => name.endsWith('_nowasm_fallback.js') || /^LICENSE_(PDFJS_)?(JBIG2|OPENJPEG)$/.test(name)],
+  ['cmaps', () => true],
+  ['standard_fonts', () => true],
 ]
 
 // https://vite.dev/config/
@@ -92,6 +108,28 @@ export default defineConfig(({ mode }) => {
           }
         },
       }),
+      {
+        name: 'pdfjs-resources',
+        apply: 'build' as const,
+        generateBundle(this: {
+          emitFile(file: { type: 'asset'; fileName: string; source: Uint8Array }): string
+        }) {
+          const root = resolve(process.cwd(), 'node_modules/pdfjs-dist')
+          for (const [folder, wanted] of PDFJS_RESOURCES) {
+            const names = readdirSync(join(root, folder)).filter(wanted)
+            if (names.length === 0) {
+              throw new Error(`pdfjs-resources: nothing to copy from pdfjs-dist/${folder}`)
+            }
+            for (const name of names) {
+              this.emitFile({
+                type: 'asset',
+                fileName: `pdfjs/${folder}/${name}`,
+                source: readFileSync(join(root, folder, name)),
+              })
+            }
+          }
+        },
+      },
       // sitemap.xml lists exactly the routes the prerenderer renders, under the
       // configured site URL, and robots.txt points at it. Both used to be
       // static files in public/ for one domain, which made every other domain's
@@ -145,6 +183,12 @@ export default defineConfig(({ mode }) => {
         },
       },
     ].filter(Boolean),
+    // PDF.js's worker is an ES module and loads its image decoders with
+    // import(); it is emitted as a module worker, which is how PDF.js itself
+    // starts it. Nothing else in the app uses a worker.
+    worker: {
+      format: 'es' as const,
+    },
     build: {
       rollupOptions: {
         output: {

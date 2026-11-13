@@ -5,6 +5,8 @@ import { API_ENDPOINTS, authFetch, failureMessage, responseError } from '../../c
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { localIsoDate } from '../../utils/localIsoDate';
 import { formatBytes } from '../../utils/fileSize';
+import { SECURE_VIEW_NOT_ELIGIBLE } from '../../utils/secureView';
+import SecureViewSwitch from './SecureViewSwitch';
 import type { LinkData, LinkUpdatePayload, RoutingRule } from './types';
 import { swatchColor, type CatalogItem } from './linkScope';
 import RoutingRulesEditor from './RoutingRulesEditor';
@@ -62,6 +64,11 @@ export default function EditModal({
     // A file link serves its uploaded file: there is no destination to edit
     // and no routing rules to give it.
     const isFile = Boolean(link.file);
+    const secureViewWas = link.file?.secure_view ?? false;
+    const [secureView, setSecureView] = useState(secureViewWas);
+    // Greyed out for a file the viewer cannot show. A link already switched on
+    // can always be switched off.
+    const secureViewEligible = link.file?.secure_view_eligible ?? false;
     const [url, setUrl] = useState(link.original_url);
     const [title, setTitle] = useState(link.title ?? '');
     const [notes, setNotes] = useState(link.notes ?? '');
@@ -213,6 +220,15 @@ export default function EditModal({
         }
 
         try {
+            // Before the save: the save reloads the list, which then shows it.
+            if (isFile && secureView !== secureViewWas) {
+                const response = await authFetch(API_ENDPOINTS.linkSecureView(link.id), {
+                    method: 'PUT',
+                    body: JSON.stringify({ enabled: secureView }),
+                });
+                if (!response.ok) throw new Error(await responseError(response, 'Failed to update Secure View'));
+            }
+
             await onSave(link.id, payload);
 
             const beforeTags = (link.tags ?? []).map(tag => tag.id);
@@ -296,6 +312,13 @@ export default function EditModal({
                             <div className="rounded-lg border border-line bg-paper px-4 py-2 text-sm text-ink">
                                 {link.file.filename} <span className="text-faint">({formatBytes(link.file.size_bytes)})</span>
                             </div>
+                            <SecureViewSwitch
+                                id="edit-secure-view"
+                                checked={secureView}
+                                onChange={setSecureView}
+                                disabled={!secureViewEligible && !secureViewWas}
+                                reason={!secureViewEligible ? SECURE_VIEW_NOT_ELIGIBLE : ''}
+                            />
                         </div>
                     )}
 
