@@ -50,6 +50,13 @@ services:
   backend:
     image: ghcr.io/leadership-now-project/opn-backend:${OPN_TAG:?set OPN_TAG in .env}
     restart: unless-stopped
+    # A ceiling, so a runaway request ends this container (which restarts)
+    # rather than the host choosing something to kill, the database included.
+    # The known case is Secure View's protected copy of a hostile PDF: the PDF
+    # library's memory while it reads such a file is not bounded (README,
+    # "The protected copy"). Normal use is tens of megabytes.
+    mem_limit: 1g
+    memswap_limit: 1g
     stop_grace_period: 30s
     depends_on:
       db:

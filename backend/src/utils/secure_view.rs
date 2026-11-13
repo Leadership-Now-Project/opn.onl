@@ -350,8 +350,11 @@ pub async fn open_for_viewer(
 
 // ---------------------------------------------------------- protected copy
 
-/// The limits the protected-copy step works within, so that no file, however
-/// it was made, can ask the server for more memory than this allows.
+/// The limits the protected-copy step works within. They do NOT bound the
+/// memory the PDF library takes while it reads a file: an object stream's
+/// inflated bytes are held to the budget, but what they parse into is not
+/// (measured: a 33 KB file, 1.9 GB). The deployment's container memory ceiling
+/// is the backstop for that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProtectLimits {
     /// The most stream bytes compared between the original and the copy, and
@@ -414,7 +417,9 @@ impl std::fmt::Display for NoCopy {
 /// as the original, so the memory this takes follows the size of the file
 /// (which the caller caps), not what a crafted file could inflate to. The one
 /// place the library inflates anything is while it reads the file (object and
-/// cross-reference streams), and each of those is held to the budget.
+/// cross-reference streams). Each of those is held to the budget in bytes, but
+/// the objects they parse into are not bounded, so a crafted file can still
+/// cost gigabytes here; see `ProtectLimits`.
 ///
 /// Blocking and CPU-bound: call it on the blocking pool.
 pub fn protect_pdf(pdf: &[u8], limits: &ProtectLimits) -> Result<Vec<u8>, NoCopy> {
