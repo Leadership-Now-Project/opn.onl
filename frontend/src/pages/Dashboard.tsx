@@ -31,6 +31,7 @@ import type { AppSettings, LinkData, LinkSortBy, LinkSortOrder, LinkUpdatePayloa
 import { takePendingUrl } from '../utils/pendingUrl';
 import { safeLocalStorage } from '../utils/storage';
 import { pluralize } from '../utils/plural';
+import { WIDE_PAGE } from '../components/pageWidth';
 import {
     EMPTY_SCOPE,
     catalogItems,
@@ -55,7 +56,7 @@ const SEARCH_DEBOUNCE_MS = 300;
 // The page takes the width it is given: the list and the create card sit side
 // by side from `lg` up. The cap only stops lines growing without end on a very
 // wide screen.
-const pageClass = 'mx-auto w-full max-w-[120rem] px-4 sm:px-6 lg:px-8 py-10';
+const pageClass = `${WIDE_PAGE} py-10`;
 
 // A link that was deleted elsewhere is refused with the same 403 as one the
 // user may not edit, so link ids cannot be probed. Either way the link is no

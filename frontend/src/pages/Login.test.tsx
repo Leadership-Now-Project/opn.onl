@@ -35,6 +35,8 @@ describe('Login Page', () => {
   it('renders login form', async () => {
     await renderLogin();
     expect(screen.getByText('Welcome back')).toBeInTheDocument();
+    // The stock build names itself; the LNP build is Login.lnp.test.tsx.
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Sign in to opn.onl');
     expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();

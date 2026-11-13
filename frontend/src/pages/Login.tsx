@@ -6,6 +6,7 @@ import { API_ENDPOINTS, authFetch, emailVerificationRequired, responseError } fr
 import SEO from '../components/SEO';
 import logger from '../utils/logger';
 import { SIGN_IN_NEEDS_STORAGE, safeLocalStorage } from '../utils/storage';
+import { SITE_NAME } from '../config/theme';
 
 // Google Identity Services, as far as this page uses it: the OAuth code flow in
 // a popup. https://developers.google.com/identity/oauth2/web/guides/use-code-model
@@ -425,7 +426,7 @@ export default function Login() {
             >
                 <div className="mb-8 text-center">
                     <p className="font-mono text-xs uppercase tracking-[0.2em] text-primary-600">Welcome back</p>
-                    <h1 className="mt-3 font-display text-3xl font-extrabold tracking-tight text-ink">Sign in to opn.onl</h1>
+                    <h1 className="mt-3 font-display text-3xl font-extrabold tracking-tight text-ink">Sign in to {SITE_NAME}</h1>
                     {settingsSettled && !googleClientId && (
                     <p className="mt-2 text-sm text-muted">
                         New here?{' '}

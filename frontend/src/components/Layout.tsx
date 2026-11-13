@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Github, LogOut, Menu, X, User, Settings, LayoutDashboard, BarChart2, Shield, Users } from 'lucide-react';
 import Logo from './Logo';
 import { safeLocalStorage } from '../utils/storage';
 import { IS_LNP, SOURCE_URL } from '../config/theme';
+import { googleSignInClientId } from '../config/api';
+import { NARROW_PAGE, WIDE_PAGE } from './pageWidth';
 
 export default function Layout() {
     const navigate = useNavigate();
@@ -14,6 +16,26 @@ export default function Layout() {
     const isAdmin = safeLocalStorage.getItem('is_admin') === 'true';
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [userMenuOpen, setUserMenuOpen] = useState(false);
+    // An instance that signs people in with Google has no sign-up form: the
+    // account is made at the first sign-in. `null` until /auth/settings has
+    // answered. Only a signed-out visitor is offered "Sign up", so only then
+    // is it asked.
+    const [googleSignIn, setGoogleSignIn] = useState<boolean | null>(null);
+    const signedOut = !token;
+    useEffect(() => {
+        if (!signedOut) return;
+        let cancelled = false;
+        void googleSignInClientId().then((clientId) => {
+            if (!cancelled) setGoogleSignIn(clientId !== null);
+        });
+        return () => { cancelled = true; };
+    }, [signedOut]);
+    // The LNP dashboard always signs in with Google, so it does not show the
+    // button for the moment before the settings arrive. Elsewhere it shows
+    // from the first paint, as it always has.
+    const signUpOffered = googleSignIn === null ? !IS_LNP : !googleSignIn;
+    // The dashboard is full width; its header and footer line up with it.
+    const pageWidth = token && location.pathname === '/dashboard' ? WIDE_PAGE : NARROW_PAGE;
 
     const closeMenus = () => {
         setMobileMenuOpen(false);
@@ -52,7 +74,7 @@ export default function Layout() {
                 Skip to content
             </a>
             <header className="sticky top-0 z-50 border-b border-line bg-surface/85 backdrop-blur-md">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div className={pageWidth}>
                     <div className="h-16 flex items-center justify-between">
                         <Link to="/" className="transition-opacity hover:opacity-80">
                             <Logo />
@@ -143,9 +165,11 @@ export default function Layout() {
                                     <Link to="/login" className="rounded-lg px-3 py-2 text-sm font-medium text-muted transition-colors hover:text-ink">
                                         Log in
                                     </Link>
-                                    <Link to="/register" className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700">
-                                        Sign up
-                                    </Link>
+                                    {signUpOffered && (
+                                        <Link to="/register" className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700">
+                                            Sign up
+                                        </Link>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -201,7 +225,9 @@ export default function Layout() {
                             ) : (
                                 <div className="flex flex-col gap-2 pt-1">
                                     <Link to="/login" className="rounded-xl border border-line2 px-4 py-2.5 text-center text-base font-medium text-ink">Log in</Link>
-                                    <Link to="/register" className="rounded-xl bg-primary-600 px-4 py-2.5 text-center text-base font-semibold text-white">Sign up</Link>
+                                    {signUpOffered && (
+                                        <Link to="/register" className="rounded-xl bg-primary-600 px-4 py-2.5 text-center text-base font-semibold text-white">Sign up</Link>
+                                    )}
                                 </div>
                             )}
                             {!IS_LNP && (
@@ -222,7 +248,7 @@ export default function Layout() {
 
             {IS_LNP ? (
             <footer className="border-t border-line bg-surface">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-faint">
+                <div className={`${pageWidth} py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-faint`}>
                     <p>© {new Date().getFullYear()} Leadership Now Project</p>
                     <p>
                         Powered by opn.onl (AGPL-3.0) ·{' '}
@@ -232,7 +258,7 @@ export default function Layout() {
             </footer>
             ) : (
             <footer className="border-t border-line bg-surface">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
+                <div className={`${pageWidth} py-14`}>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
                         <div className="col-span-2 md:col-span-1">
                             <Logo className="mb-4" />

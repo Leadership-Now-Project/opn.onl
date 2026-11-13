@@ -276,6 +276,22 @@ export async function emailVerificationRequired(): Promise<boolean> {
     }
 }
 
+// The OAuth client id from GET /auth/settings when the instance signs people
+// in with Google, else null. A read that fails is null too: the pages that ask
+// then behave as on an instance without Google sign-in.
+export async function googleSignInClientId(): Promise<string | null> {
+    try {
+        const res = await fetch(API_ENDPOINTS.appSettings);
+        if (!res.ok) return null;
+        const settings = await res.json();
+        return typeof settings?.google_client_id === 'string' && settings.google_client_id
+            ? settings.google_client_id
+            : null;
+    } catch {
+        return null;
+    }
+}
+
 // Helper for API calls with error handling
 export async function apiCall<T>(
     url: string,

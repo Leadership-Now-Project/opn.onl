@@ -346,10 +346,24 @@ jobs:
           # The Google sign-in sources are a build arg only the LNP dashboard
           # image sets. A stock build must carry neither a leftover placeholder
           # nor any of them: the policy is the one asserted above, unchanged.
-          ! printf '%s\n' "$headers" | grep -Fq '__CSP_GOOGLE_'
-          ! docker exec "$container_id" grep -Rq '__CSP_GOOGLE_' /etc/nginx/conf.d
-          ! docker exec "$container_id" grep -Rq 'accounts.google.com' /etc/nginx/conf.d
-          ! printf '%s\n' "$headers" | grep -iF "frame-src"
+          # Each guard is an `if`: `set -e` ignores a command negated with `!`,
+          # so a bare `! grep` line could never fail the job.
+          if printf '%s\n' "$headers" | grep -Fq '__CSP_GOOGLE_'; then
+            echo "a stock build's headers still carry a __CSP_GOOGLE_ placeholder"
+            exit 1
+          fi
+          if docker exec "$container_id" grep -Rq '__CSP_GOOGLE_' /etc/nginx/conf.d; then
+            echo "a stock build's nginx config still carries a __CSP_GOOGLE_ placeholder"
+            exit 1
+          fi
+          if docker exec "$container_id" grep -Rq 'accounts.google.com' /etc/nginx/conf.d; then
+            echo "a stock build's nginx config names accounts.google.com"
+            exit 1
+          fi
+          if printf '%s\n' "$headers" | grep -iF "frame-src"; then
+            echo "a stock build's policy has a frame-src directive"
+            exit 1
+          fi
           printf '%s\n' "$headers" | grep -iF "; style-src 'self' 'unsafe-inline'; img-src"
           printf '%s\n' "$headers" | grep -iF "https://cloudflareinsights.com; frame-ancestors 'self';"
 
@@ -385,10 +399,19 @@ jobs:
             printf '%s\n' "$google_headers" | grep -iF "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style;"
             printf '%s\n' "$google_headers" | grep -iF "connect-src 'self' https://api.smoke.test wss://api.smoke.test https://www.google-analytics.com https://region1.google-analytics.com https://www.google.com https://cloudflareinsights.com https://accounts.google.com/gsi/;"
             printf '%s\n' "$google_headers" | grep -iF "; frame-src https://accounts.google.com/gsi/; frame-ancestors 'self';"
-            ! printf '%s\n' "$google_headers" | grep -iF "unsafe-eval"
-            ! printf '%s\n' "$google_headers" | grep -Fq '__CSP_GOOGLE_'
+            if printf '%s\n' "$google_headers" | grep -iF "unsafe-eval"; then
+              echo "the Google sign-in policy for ${path} allows unsafe-eval"
+              exit 1
+            fi
+            if printf '%s\n' "$google_headers" | grep -Fq '__CSP_GOOGLE_'; then
+              echo "the headers for ${path} still carry a __CSP_GOOGLE_ placeholder"
+              exit 1
+            fi
           done
-          ! docker exec "$container_id" grep -Rq '__CSP_GOOGLE_' /etc/nginx/conf.d
+          if docker exec "$container_id" grep -Rq '__CSP_GOOGLE_' /etc/nginx/conf.d; then
+            echo "the Google sign-in nginx config still carries a __CSP_GOOGLE_ placeholder"
+            exit 1
+          fi
 
           # Anything but true/false/unset is a typo, not "off".
           if docker build --file frontend/Dockerfile --target csp-config \

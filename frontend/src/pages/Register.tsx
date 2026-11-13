@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Loader2, Mail, Lock, Check, CheckCircle, Send } from 'lucide-react';
 import { motion } from 'framer-motion';
-import { API_ENDPOINTS, authFetch, emailVerificationRequired, responseError } from '../config/api';
+import { API_ENDPOINTS, authFetch, emailVerificationRequired, googleSignInClientId, responseError } from '../config/api';
 import SEO from '../components/SEO';
 import { SIGN_IN_NEEDS_STORAGE, safeLocalStorage } from '../utils/storage';
+import { IS_LNP } from '../config/theme';
 
 const passwordRequirements = [
     { label: 'At least 8 characters', test: (p: string) => p.length >= 8 },
@@ -27,6 +28,20 @@ export default function Register() {
         if (token) {
             navigate('/dashboard', { replace: true });
         }
+    }, [navigate]);
+
+    // An instance that signs people in with Google makes the account at the
+    // first sign-in, so there is nothing to register here: go to the login
+    // page. `null` until /auth/settings has answered.
+    const [googleSignIn, setGoogleSignIn] = useState<boolean | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        void googleSignInClientId().then((clientId) => {
+            if (cancelled) return;
+            setGoogleSignIn(clientId !== null);
+            if (clientId !== null) navigate('/login', { replace: true });
+        });
+        return () => { cancelled = true; };
     }, [navigate]);
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -94,6 +109,11 @@ export default function Register() {
     };
 
     const allRequirementsMet = passwordRequirements.every(req => req.test(password));
+
+    // No password form while the page is on its way to /login. The LNP
+    // dashboard always signs in with Google, so there it also waits for the
+    // settings instead of showing the form for a moment.
+    if (googleSignIn || (IS_LNP && googleSignIn === null)) return null;
 
     // Show verification email sent screen
     if (registrationComplete) {
