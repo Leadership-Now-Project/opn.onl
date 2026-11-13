@@ -102,7 +102,7 @@ services:
       # Public link-in-bio pages are off until someone asks for them.
       ENABLE_LINK_IN_BIO: "false"
       ENABLE_ACCOUNT_DELETION: "false"
-      ENABLE_API_KEYS: "true"
+      ENABLE_API_KEYS: ${ENABLE_API_KEYS:-false}
       ENABLE_CUSTOM_ALIASES: "true"
       MIN_ALIAS_LENGTH: "4"
       MAX_ALIAS_LENGTH: "50"
