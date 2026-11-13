@@ -5,6 +5,11 @@
  * overlay on top.
  */
 
+/** The outline: white, well short of opaque. */
+export const WATERMARK_OUTLINE = 'rgba(255, 255, 255, 0.5)';
+/** The letters: a slate grey, light enough to read through. Never black. */
+export const WATERMARK_FILL = 'rgba(40, 48, 66, 0.26)';
+
 /** "pat@example.org · 2026-11-13 14:05 UTC". Minute precision, always UTC. */
 export function watermarkText(email: string, at: string): string {
     const when = new Date(at);
@@ -28,6 +33,10 @@ export function drawWatermark(canvas: HTMLCanvasElement, text: string): void {
     context.save();
     context.font = `600 ${fontSize}px Helvetica, Arial, sans-serif`;
     context.textBaseline = 'middle';
+    context.lineJoin = 'round';
+    context.lineWidth = Math.max(2, fontSize / 7);
+    context.strokeStyle = WATERMARK_OUTLINE;
+    context.fillStyle = WATERMARK_FILL;
     const stepX = context.measureText(text).width + fontSize * 4;
     const stepY = fontSize * 7;
     // Rotated about the centre; the grid is drawn large enough to cover the
@@ -40,11 +49,12 @@ export function drawWatermark(canvas: HTMLCanvasElement, text: string): void {
         // Every other row is shifted, so no straight band is left clear.
         const shift = row % 2 === 0 ? 0 : stepX / 2;
         for (let x = -reach - shift; x <= reach; x += stepX) {
-            // Dark and light together: readable on white paper and on a dark
-            // photograph alike.
-            context.fillStyle = 'rgba(255, 255, 255, 0.22)';
-            context.fillText(text, x + 1, y + 1);
-            context.fillStyle = 'rgba(20, 28, 48, 0.16)';
+            // A soft white outline under a light grey fill. On white paper
+            // the outline disappears and only the grey shows; on a dark or
+            // busy photograph the outline is what keeps the letters legible.
+            // Both stay faint on purpose: the watermark must not get in the
+            // way of reading.
+            context.strokeText(text, x, y);
             context.fillText(text, x, y);
         }
     }

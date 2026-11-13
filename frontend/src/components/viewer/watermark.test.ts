@@ -23,6 +23,10 @@ function fakeCanvas(width: number, height: number) {
         rotate: vi.fn(),
         measureText: vi.fn(() => ({ width: 300 })),
         fillText: vi.fn(),
+        strokeText: vi.fn(),
+        strokeStyle: '',
+        lineWidth: 0,
+        lineJoin: '',
         font: '',
         textBaseline: '',
         fillStyle: '',
@@ -32,6 +36,25 @@ function fakeCanvas(width: number, height: number) {
 }
 
 describe('drawWatermark', () => {
+    it('outlines every tile in a faint white under a light grey fill, never black', () => {
+        const { canvas, context } = fakeCanvas(1200, 1600);
+        drawWatermark(canvas, 'pat@example.org');
+        // One outline per fill, at the same place, drawn first.
+        expect(context.strokeText.mock.calls).toEqual(context.fillText.mock.calls);
+        expect(context.strokeText.mock.invocationCallOrder[0]).toBeLessThan(context.fillText.mock.invocationCallOrder[0]);
+        const parts = (colour: string) => colour.match(/[\d.]+/g)!.map(Number);
+        const [or, og, ob, oa] = parts(context.strokeStyle);
+        expect([or, og, ob]).toEqual([255, 255, 255]);
+        expect(oa).toBeGreaterThan(0.3);
+        expect(oa).toBeLessThanOrEqual(0.6);
+        const [fr, fg, fb, fa] = parts(context.fillStyle);
+        // Grey, not black, and mostly see-through.
+        expect(Math.min(fr, fg, fb)).toBeGreaterThanOrEqual(30);
+        expect(fa).toBeGreaterThan(0.15);
+        expect(fa).toBeLessThanOrEqual(0.35);
+        expect(context.lineWidth).toBeGreaterThanOrEqual(2);
+    });
+
     it('tiles the text across the whole page, slanted, and puts the canvas back as it was', () => {
         const { canvas, context } = fakeCanvas(1200, 1600);
         drawWatermark(canvas, 'pat@example.org · 2026-11-13 14:05 UTC');

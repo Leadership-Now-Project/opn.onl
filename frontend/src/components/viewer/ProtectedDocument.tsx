@@ -18,7 +18,8 @@ function watermarkTile(text: string): string {
         `<svg xmlns="http://www.w3.org/2000/svg" width="460" height="260">` +
         `<text x="230" y="130" text-anchor="middle" transform="rotate(-30 230 130)" ` +
         `font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" ` +
-        `fill="rgb(20,28,48)" fill-opacity="0.13">${safe}</text></svg>`;
+        `fill="rgb(40,48,66)" fill-opacity="0.13" stroke="rgb(255,255,255)" stroke-opacity="0.3" ` +
+        `stroke-width="2.5" stroke-linejoin="round" paint-order="stroke">${safe}</text></svg>`;
     // encodeURIComponent leaves ( ) ' ! * as they are; inside url(...) they
     // are safer encoded too.
     const encoded = encodeURIComponent(svg).replace(
