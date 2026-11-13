@@ -115,6 +115,7 @@ async fn links_in_an_org_the_user_left_do_not_count() {
         report: roomy(),
         secure_view: roomy(),
         secure_view_ip: roomy(),
+        media_page: roomy(),
     });
     let server = axum_test::TestServer::new(opn_onl_backend::build_router(state)).expect("server");
 

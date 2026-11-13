@@ -55,6 +55,7 @@ fn open_limiters() -> Arc<RateLimiters> {
         report: roomy(),
         secure_view: roomy(),
         secure_view_ip: roomy(),
+        media_page: roomy(),
     })
 }
 

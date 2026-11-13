@@ -15,6 +15,7 @@ pub mod link_expiry;
 pub mod link_owner;
 pub mod link_unlock;
 pub mod logging;
+pub mod media;
 pub mod privacy;
 pub mod rate_limiter;
 pub mod retired_codes;

@@ -74,6 +74,7 @@ mod link_update_semantics_tests;
 mod links_list_query_tests;
 mod links_tests;
 mod mail_background_tests;
+mod media_link_tests;
 mod org_link_access_tests;
 mod org_link_reassign_bio_tests;
 mod org_list_query_tests;

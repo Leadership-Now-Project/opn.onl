@@ -58,6 +58,11 @@ pub struct AppState {
     /// on an instance with Google sign-in; `GET /auth/settings` then has no
     /// `drive` entry and nothing else behaves differently.
     pub drive: Option<utils::drive::DrivePicker>,
+    /// Asks YouTube or Vimeo whether a video can be embedded, when a media
+    /// link is created. `None` when `MEDIA_EMBED_CHECK` turns it off: media
+    /// links are then created unchecked, and say so. Tests put a stand-in
+    /// here, so no test reaches the network.
+    pub embed_check: Option<Arc<dyn utils::media::EmbedChecker>>,
 }
 
 impl AppState {
@@ -82,6 +87,9 @@ impl AppState {
             files: None,
             // Off, as on an instance without the picker settings.
             drive: None,
+            // Off: a test never asks YouTube or Vimeo anything. A test of
+            // the check sets a stand-in.
+            embed_check: None,
         }
     }
 }
@@ -738,6 +746,8 @@ pub fn build_router(app_state: AppState) -> Router {
         // Secure View: the viewer page's two calls.
         .route("/:code/view", post(handlers::secure_view::open_view))
         .route("/:code/view/file", get(handlers::secure_view::view_file))
+        // Media links: the media page's one call.
+        .route("/:code/media", post(handlers::media::open_media))
         .route("/:code", get(handlers::links::redirect_link))
         // State
         .with_state(app_state)

@@ -21,8 +21,8 @@ use validator::Validate;
 
 use crate::AppState;
 use crate::entity::{
-    blocked_domains, blocked_links, click_events, link_drive_files, link_files, link_tags, links,
-    tags, users,
+    blocked_domains, blocked_links, click_events, link_drive_files, link_files, link_media,
+    link_tags, links, tags, users,
 };
 use crate::handlers::link_access::{
     CallerAccess, LinkAction, count_own_live_links, created_by, listed_links, live_link_for,
@@ -722,6 +722,12 @@ const RESERVED_ALIASES: &[&str] = &[
     // `/r/<code>` before those proxies, so its viewer and interstitial pages
     // open too; the name is reserved so no new link depends on that order.
     "view",
+    // The media page (/m/<code>), and its call `POST /{code}/media`, which
+    // nginx proxies like `/<code>/view`. As above: a link that already has
+    // one of these codes keeps redirecting, and nginx serves `/m/<code>`
+    // before the proxies.
+    "m",
+    "media",
 ];
 
 /// Validate alias format and length
@@ -959,8 +965,10 @@ mod reserved_alias_tests {
 
     #[test]
     fn the_viewer_and_interstitial_pages_reach_the_spa_whatever_the_code_is() {
-        for code in ["abc123", "view", "verify", "preview", "file", "v", "r"] {
-            for page in ["v", "r"] {
+        for code in [
+            "abc123", "view", "verify", "preview", "file", "media", "v", "r", "m",
+        ] {
+            for page in ["v", "r", "m"] {
                 let block = nginx_block_for(&format!("/{page}/{code}"));
                 assert!(
                     block.contains("try_files /index.html") && !block.contains("proxy_pass"),
@@ -979,6 +987,11 @@ mod reserved_alias_tests {
             "/view/view/file",
             "/abc123/verify",
             "/abc123/preview",
+            "/media",
+            "/m",
+            "/abc123/media",
+            "/media/media",
+            "/view/media",
         ] {
             let block = nginx_block_for(path);
             assert!(
@@ -986,8 +999,51 @@ mod reserved_alias_tests {
                 "{path} must be proxied to the backend, not: {block}"
             );
         }
-        // And `view` cannot be taken as a new alias.
+        // And `view` cannot be taken as a new alias, nor the media page's words.
         assert!(is_reserved("view"), "view must be a reserved alias");
+        assert!(is_reserved("media"), "media must be a reserved alias");
+        assert!(is_reserved("m"), "m must be a reserved alias");
+    }
+
+    /// The public host (ldr.now) reaches the API under `/api/`. Its locations
+    /// are nested in the `^~ /api/` block, which `nginx_block_for` leaves out.
+    #[test]
+    fn the_public_host_passes_the_media_call_and_nothing_wider() {
+        let nested: Vec<(regex::Regex, String)> =
+            regex_locations(include_str!("../../../deploy/lnp/nginx/public.conf"), false)
+                .into_iter()
+                .filter(|(regex, _)| regex.as_str().starts_with("^/api/"))
+                .collect();
+        let block_for = |path: &str| {
+            nested
+                .iter()
+                .find(|(regex, _)| regex.is_match(path))
+                .map(|(_, block)| block.clone())
+                .unwrap_or_else(|| "return 404;".to_string())
+        };
+        for path in [
+            "/api/abc123",
+            "/api/abc123/media",
+            "/api/abc123/view",
+            "/api/abc123/verify",
+            "/api/media/media",
+        ] {
+            assert!(
+                block_for(path).contains("proxy_pass $backend_url"),
+                "{path} must reach the backend on the public host"
+            );
+        }
+        for path in [
+            "/api/abc123/media/extra",
+            "/api/abc123/medias",
+            "/api/links/media",
+            "/api/abc123/other",
+        ] {
+            assert!(
+                !block_for(path).contains("proxy_pass"),
+                "{path} must not reach the backend on the public host"
+            );
+        }
     }
 
     fn is_reserved(name: &str) -> bool {
@@ -1049,7 +1105,7 @@ mod reserved_alias_tests {
         // `/r/<alias>` look like that call.
         let mut suffixes = words_after(nginx, "{1,255})/");
         suffixes.extend(words_after(include_str!("../lib.rs"), "\"/:code/"));
-        for word in ["verify", "preview", "view"] {
+        for word in ["verify", "preview", "view", "media"] {
             assert!(
                 suffixes.iter().any(|name| name == word),
                 "the /<code>/<word> parser missed {word}: {suffixes:?}"
@@ -1121,6 +1177,36 @@ pub struct CreateLinkRequest {
     /// was made by picking a file in Drive. The destination must then be an
     /// `https` address on `docs.google.com` or `drive.google.com`.
     pub drive_file: Option<DriveFileRef>,
+    /// Make this a media link: opening it shows a page with the video's
+    /// player on it instead of redirecting. `original_url` must then be a
+    /// YouTube or Vimeo video address, or, with `drive_file`, a video in
+    /// Google Drive. The server reads the video out of `original_url` itself
+    /// and stores its own spelling of that address.
+    pub media: Option<MediaRequest>,
+}
+
+/// What `POST /links` takes to make a media link. There is no field for the
+/// player's address: the server builds it.
+#[derive(Deserialize, ToSchema, Clone, Debug, Default)]
+pub struct MediaRequest {
+    /// `youtube`, `vimeo` or `drive`. Optional for YouTube and Vimeo, where
+    /// the address says which it is; a name that disagrees with the address
+    /// is refused. `drive` needs `drive_file`.
+    pub provider: Option<String>,
+    /// The label of an optional button under the player. At most 40
+    /// characters. Given together with `cta_url`, or not at all.
+    pub cta_label: Option<String>,
+    /// Where that button goes: an `https` address that passes the same checks
+    /// as a link's destination.
+    pub cta_url: Option<String>,
+}
+
+/// The button under a media link's player, as `PUT /links/{id}` takes it.
+/// Both empty removes the button.
+#[derive(Deserialize, ToSchema, Clone, Debug, Default)]
+pub struct MediaCtaRequest {
+    pub label: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Deserialize, Validate, ToSchema)]
@@ -1165,6 +1251,10 @@ pub struct UpdateLinkRequest {
     /// Remove the click cap. On a burn-after-reading link this also turns
     /// burn-after-reading off, because a one-time link cannot be uncapped.
     pub remove_max_clicks: Option<bool>,
+    /// Set, change or (with both fields empty) remove the button under a
+    /// media link's player. Refused for a link that is not a media link, and
+    /// together with a new `original_url` (which ends the media page).
+    pub media_cta: Option<MediaCtaRequest>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -1390,6 +1480,37 @@ pub struct LinkResponse {
     /// file's address in Drive; the link redirects like any other.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drive: Option<LinkDriveInfo>,
+    /// Only on a media link: opening it shows a page with the video's player
+    /// instead of redirecting. `original_url` is the video's own page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<LinkMediaInfo>,
+}
+
+/// What a link list shows of a media link.
+#[derive(Serialize, ToSchema, Clone, Debug, PartialEq)]
+pub struct LinkMediaInfo {
+    /// `youtube`, `vimeo` or `drive`.
+    pub provider: String,
+    /// The label and link of the button under the player, when it has one.
+    pub cta_label: Option<String>,
+    pub cta_url: Option<String>,
+    /// Only in the answer to `POST /links`: `checked` when the video's host
+    /// said the video can be embedded, `not_checked` when it could not be
+    /// asked (the link is created all the same). Absent for a Drive video,
+    /// which is not checked by the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed_check: Option<String>,
+}
+
+impl LinkMediaInfo {
+    fn of(row: &link_media::Model) -> Self {
+        Self {
+            provider: row.provider.clone(),
+            cta_label: row.cta_label.clone(),
+            cta_url: row.cta_url.clone(),
+            embed_check: None,
+        }
+    }
 }
 
 /// What a link list shows of the Google Drive file a link was made for.
@@ -1437,15 +1558,34 @@ pub(crate) async fn attach_file_info<'a, C: ConnectionTrait>(
 ) -> Result<(), DbErr> {
     let mut file_link_ids: Vec<i32> = Vec::new();
     let mut drive_link_ids: Vec<i32> = Vec::new();
+    let mut media_link_ids: Vec<i32> = Vec::new();
     for link in rows {
         if link.is_file() {
             file_link_ids.push(link.id);
         } else if crate::utils::drive::is_drive_url(&link.original_url) {
             // Only a link that points into Drive can have a row.
             drive_link_ids.push(link.id);
+        } else if crate::utils::media::parse_media_url(&link.original_url).is_some() {
+            // Only a link to a YouTube or Vimeo video can be a media link
+            // (or one to a video in Drive, found below).
+            media_link_ids.push(link.id);
         }
     }
     attach_drive_info(db, &drive_link_ids, responses).await?;
+    // A Drive media link is a Drive link whose file is a video, so only
+    // those are looked up: a page of documents runs no media query.
+    media_link_ids.extend(
+        responses
+            .iter()
+            .filter(|response| {
+                response
+                    .drive
+                    .as_ref()
+                    .is_some_and(|drive| crate::utils::media::is_video_mime(&drive.mime_type))
+            })
+            .map(|response| response.id),
+    );
+    attach_media_info(db, &media_link_ids, responses).await?;
     if file_link_ids.is_empty() {
         return Ok(());
     }
@@ -1501,6 +1641,32 @@ async fn attach_drive_info<C: ConnectionTrait>(
     Ok(())
 }
 
+async fn attach_media_info<C: ConnectionTrait>(
+    db: &C,
+    media_link_ids: &[i32],
+    responses: &mut [LinkResponse],
+) -> Result<(), DbErr> {
+    if media_link_ids.is_empty() {
+        return Ok(());
+    }
+    let mut by_link: HashMap<i32, LinkMediaInfo> = HashMap::new();
+    for chunk in media_link_ids.chunks(TAG_LOOKUP_CHUNK) {
+        let rows = link_media::Entity::find()
+            .filter(link_media::Column::LinkId.is_in(chunk.to_vec()))
+            .all(db)
+            .await?;
+        for row in rows {
+            by_link.insert(row.link_id, LinkMediaInfo::of(&row));
+        }
+    }
+    for response in responses {
+        if let Some(info) = by_link.remove(&response.id) {
+            response.media = Some(info);
+        }
+    }
+    Ok(())
+}
+
 impl LinkResponse {
     /// A stored link as the API shows it. `GET /links` and `GET /links/{id}`
     /// both build their items here, so the two cannot drift apart. The caller
@@ -1536,6 +1702,7 @@ impl LinkResponse {
             can_delete: None,
             file: None,
             drive: None,
+            media: None,
         }
     }
 }
@@ -2250,10 +2417,18 @@ fn file_redirect(url: &str) -> axum::response::Response {
 /// request too. Nothing is counted or used up here; the viewer does that when
 /// it trades the ticket and an email for the file.
 fn viewer_redirect(code: &str, ticket: &str) -> axum::response::Response {
+    page_redirect("v", code, ticket)
+}
+
+/// 302 to the SPA page `{FRONTEND_URL}/{page}/{code}` with `ticket` in the
+/// fragment: the Secure View viewer (`v`) and the media page (`m`). Never
+/// stored (`no-store`), and the address is kept from the next request
+/// (`no-referrer`).
+fn page_redirect(page: &str, code: &str, ticket: &str) -> axum::response::Response {
     use axum::http::{HeaderValue, header};
 
     let location = format!(
-        "{}/v/{}#t={}",
+        "{}/{page}/{}#t={}",
         get_base_url(),
         urlencoding::encode(code),
         urlencoding::encode(ticket)
@@ -2275,22 +2450,30 @@ fn viewer_redirect(code: &str, ticket: &str) -> axum::response::Response {
 /// Whether a link's redirect may be kept in the Redis cache: a plain redirect
 /// to a URL, with no password, click cap or interstitial to enforce per
 /// request. A file link never is. Its destination is signed for one visit and
-/// expires, so there is nothing that could be served again later.
+/// expires, so there is nothing that could be served again later. Nor is a
+/// link whose destination could be a media link's (a YouTube or Vimeo video,
+/// an address in Google Drive): a media link opens its page, and a cached
+/// destination would send the visitor straight past it. The cache holds no
+/// "this is a media link" mark, so the rule is on the destination, and an
+/// ordinary link to such an address takes the database path too.
 pub(crate) fn redirect_is_cacheable(link: &links::Model) -> bool {
     link.password_hash.is_none()
         && link.effective_max_clicks().is_none()
         && !link.safe_link_interstitial
         && !link.is_file()
+        && !crate::utils::media::could_be_media(&link.original_url)
 }
 
 /// Whether a cache entry may be served without the database path. The same
 /// rule as [`redirect_is_cacheable`], applied to what was stored: an entry
-/// that holds a file marker is ignored, however it got there.
+/// that holds a file marker, or a destination that could be a media link's,
+/// is ignored, however it got there.
 pub(crate) fn cached_redirect_is_servable(cached: &crate::utils::cache::CachedLink) -> bool {
     !cached.has_password
         && cached.max_clicks.is_none()
         && !cached.safe_link_interstitial
         && !cached.original_url.starts_with(links::FILE_LINK_PREFIX)
+        && !crate::utils::media::could_be_media(&cached.original_url)
 }
 
 #[cfg(test)]
@@ -2373,6 +2556,35 @@ mod file_link_cache_tests {
         let mut capped = cached("https://iana.org/");
         capped.max_clicks = Some(1);
         assert!(!cached_redirect_is_servable(&capped));
+    }
+
+    /// The destinations a media link can have. A cached one would be served
+    /// as a plain redirect, past the media page.
+    const MEDIA_DESTINATIONS: [&str; 4] = [
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s",
+        "https://vimeo.com/76979871/abc123def0",
+        "https://drive.google.com/file/d/1AbC_d-9/view?usp=drivesdk",
+    ];
+
+    #[test]
+    fn a_destination_that_could_be_a_media_links_is_never_written_to_the_cache() {
+        for url in MEDIA_DESTINATIONS {
+            assert!(!redirect_is_cacheable(&link(url)), "{url}");
+        }
+        // The same hosts' other pages are ordinary destinations.
+        assert!(redirect_is_cacheable(&link("https://www.youtube.com/")));
+        assert!(redirect_is_cacheable(&link("https://vimeo.com/features")));
+    }
+
+    #[test]
+    fn a_cache_entry_that_could_be_a_media_links_is_not_served() {
+        for url in MEDIA_DESTINATIONS {
+            assert!(!cached_redirect_is_servable(&cached(url)), "{url}");
+        }
+        assert!(cached_redirect_is_servable(&cached(
+            "https://www.youtube.com/"
+        )));
     }
 }
 
@@ -2582,6 +2794,81 @@ pub(crate) async fn insert_link(
         payload.org_id = crate::handlers::default_org::home_org(&state.db, uid).await;
     }
 
+    // A media link. Which video it is for is read from the address HERE, and
+    // the destination stored is this server's own spelling of that address:
+    // nothing a client sends is ever used as the player's address.
+    let media_request = payload.media.take();
+    let mut media_plan: Option<MediaPlan> = None;
+    if let Some(request) = &media_request {
+        use crate::utils::media::{Provider, parse_media_url};
+
+        if file.is_some() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "An uploaded file cannot be a media link",
+            );
+        }
+        let named = match request
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            None => None,
+            Some(name) => match Provider::from_name(name) {
+                Some(provider) => Some(provider),
+                None => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "media.provider must be youtube, vimeo or drive",
+                    );
+                }
+            },
+        };
+        if named == Some(Provider::Drive) {
+            if payload.drive_file.is_none() {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "A Google Drive video needs drive_file",
+                );
+            }
+            media_plan = Some(MediaPlan::Drive);
+        } else {
+            let Some(parsed) = parse_media_url(&payload.original_url) else {
+                return json_error(StatusCode::BAD_REQUEST, NOT_A_VIDEO_ADDRESS);
+            };
+            if named.is_some_and(|provider| provider != parsed.provider) {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "media.provider does not match the video's address",
+                );
+            }
+            if payload.drive_file.is_some() {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "drive_file is only for a Google Drive video",
+                );
+            }
+            payload.original_url = parsed.canonical_url();
+            media_plan = Some(MediaPlan::Hosted(parsed));
+        }
+    }
+    let media_cta = match &media_request {
+        None => None,
+        Some(request) => {
+            match checked_media_cta(
+                &state.db,
+                request.cta_label.as_deref(),
+                request.cta_url.as_deref(),
+            )
+            .await
+            {
+                Ok(cta) => cta,
+                Err(refusal) => return *refusal,
+            }
+        }
+    };
+
     // Validate URL first. A file link has none: its `original_url` is the
     // marker `GET /{code}` recognises, which no URL can be mistaken for.
     let validated_url = match file {
@@ -2618,6 +2905,18 @@ pub(crate) async fn insert_link(
             }
         }
     };
+    // A Drive media link is a Drive link (everything above applies) whose
+    // file is a video: Google's player shows nothing else.
+    if matches!(media_plan, Some(MediaPlan::Drive))
+        && !drive_file
+            .as_ref()
+            .is_some_and(|drive_file| crate::utils::media::is_video_mime(&drive_file.mime_type))
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Only a video can be shared as a media link. This Google Drive file is not a video.",
+        );
+    }
 
     // An empty password is no password. The unlock form will not submit an
     // empty field, so a link "protected" by "" could never be opened from the
@@ -2795,6 +3094,43 @@ pub(crate) async fn insert_link(
             }
         }
     };
+
+    // Ask the video's host whether it can be embedded, once the address, the
+    // button and the alias are accepted and before anything is written: a
+    // video that cannot be shown gets no link. Only the
+    // host's own "no" refuses. When the check is off, or the host could not
+    // be reached, the link is created and the answer says it was not checked.
+    let title_given = payload
+        .title
+        .as_deref()
+        .is_some_and(|title| !title.trim().is_empty());
+    let mut embed_check: Option<&'static str> = None;
+    match &media_plan {
+        Some(MediaPlan::Hosted(parsed)) => {
+            use crate::utils::media::EmbedVerdict;
+            let verdict = match &state.embed_check {
+                Some(checker) => checker.check(parsed).await,
+                None => EmbedVerdict::Unknown,
+            };
+            match verdict {
+                EmbedVerdict::Embeddable { title } => {
+                    embed_check = Some("checked");
+                    if !title_given {
+                        payload.title = title;
+                    }
+                }
+                EmbedVerdict::Refused(reason) => {
+                    return json_error(StatusCode::BAD_REQUEST, reason);
+                }
+                EmbedVerdict::Unknown => embed_check = Some("not_checked"),
+            }
+        }
+        // The page's heading: the file's name, unless a title was given.
+        Some(MediaPlan::Drive) if !title_given => {
+            payload.title = drive_file.as_ref().map(|file| file.name.clone());
+        }
+        _ => {}
+    }
 
     let password_hash = if let Some(password) = link_password {
         match crate::utils::jwt::hash_password(password).await {
@@ -3004,6 +3340,45 @@ pub(crate) async fn insert_link(
         }
     }
 
+    // Which video the link shows, in the transaction that made the link, so
+    // a media link never exists for a moment as a plain redirect.
+    let media_row = match &media_plan {
+        None => None,
+        Some(plan) => {
+            use crate::utils::media::Provider;
+            let (provider, media_id) = match plan {
+                MediaPlan::Hosted(parsed) => (parsed.provider, parsed.media_id.clone()),
+                MediaPlan::Drive => (
+                    Provider::Drive,
+                    drive_file
+                        .as_ref()
+                        .map(|file| file.file_id.clone())
+                        .unwrap_or_default(),
+                ),
+            };
+            Some(link_media::ActiveModel {
+                link_id: Set(link_id),
+                provider: Set(provider.as_str().to_string()),
+                media_id: Set(media_id),
+                cta_label: Set(media_cta.as_ref().map(|(label, _)| label.clone())),
+                cta_url: Set(media_cta.as_ref().map(|(_, url)| url.clone())),
+                ..Default::default()
+            })
+        }
+    };
+    let media_info = media_row.as_ref().map(|row| LinkMediaInfo {
+        provider: row.provider.clone().unwrap(),
+        cta_label: row.cta_label.clone().unwrap(),
+        cta_url: row.cta_url.clone().unwrap(),
+        embed_check: embed_check.map(str::to_string),
+    });
+    if let Some(row) = media_row
+        && link_media::Entity::insert(row).exec(&txn).await.is_err()
+    {
+        let _ = txn.rollback().await;
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+    }
+
     for tag_id in tag_ids {
         let link_tag = link_tags::ActiveModel {
             link_id: Set(link_id),
@@ -3081,9 +3456,52 @@ pub(crate) async fn insert_link(
                 name: drive_file.name,
                 mime_type: drive_file.mime_type,
             }),
+            media: media_info,
         }),
     )
         .into_response()
+}
+
+/// What a link's address must be to become a media link.
+pub const NOT_A_VIDEO_ADDRESS: &str = "This is not a YouTube or Vimeo video address. Paste the address of one video, such as https://www.youtube.com/watch?v=... or https://vimeo.com/...";
+
+/// Which video a new media link is for.
+enum MediaPlan {
+    /// A YouTube or Vimeo video, read from the address.
+    Hosted(crate::utils::media::ParsedMedia),
+    /// A video in Google Drive: its id is the `drive_file`'s.
+    Drive,
+}
+
+/// The button under a media link's player, checked: both a label and a link
+/// or neither, the link `https` and passing everything a link's destination
+/// passes (the URL rules, the blocklist, no internal address). `Ok(None)`
+/// when there is no button; `Err` is the answer to give (boxed: a response is
+/// large).
+async fn checked_media_cta(
+    db: &DatabaseConnection,
+    label: Option<&str>,
+    url: Option<&str>,
+) -> Result<Option<(String, String)>, Box<Response>> {
+    let refuse = |status: StatusCode, reason: String| Box::new(json_error(status, reason));
+    let Some((label, url)) = crate::utils::media::cta_text(label, url)
+        .map_err(|reason| refuse(StatusCode::BAD_REQUEST, reason))?
+    else {
+        return Ok(None);
+    };
+    let url = validate_url(&url).map_err(|reason| {
+        refuse(
+            StatusCode::BAD_REQUEST,
+            format!("The button's link was refused: {reason}"),
+        )
+    })?;
+    check_blocked(db, &url)
+        .await
+        .map_err(|reason| refuse(StatusCode::FORBIDDEN, reason))?;
+    ensure_public_destination(&url)
+        .await
+        .map_err(|reason| refuse(StatusCode::BAD_REQUEST, reason))?;
+    Ok(Some((label, url)))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -3763,7 +4181,19 @@ pub async fn redirect_link(
         // cap consume below, so a blocked routed destination can't waste a click
         // slot or burn a one-time link without serving anything.
         // A file link is not routed: it serves its one file.
-        let routing_rules = if link.is_file() {
+        //
+        // A media link: the visitor is sent to the page that shows the video,
+        // not to the video's host. Looked up here, behind every gate above,
+        // and only for a link whose destination could be a media link's (no
+        // query for any other). It is not routed either: it shows one video.
+        let media = match crate::utils::media::media_of_link(&state.db, &link).await {
+            Ok(media) => media,
+            Err(error) => {
+                tracing::error!("Failed to load the media of link {}: {}", code, error);
+                return link_state_unavailable().into_response();
+            }
+        };
+        let routing_rules = if link.is_file() || media.is_some() {
             Vec::new()
         } else {
             active_routing_rules(&state.db, link.id).await
@@ -3847,6 +4277,22 @@ pub async fn redirect_link(
             }
         } else {
             None
+        };
+
+        // A media link's ticket is made before the cap is consumed, for the
+        // same reason: a ticket that cannot be signed must not use up a click.
+        let media_ticket = match &media {
+            None => None,
+            Some(_) => match crate::utils::media::create_media_ticket(&link) {
+                Some(ticket) => Some(ticket),
+                None => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Unable to open the media page",
+                    )
+                        .into_response();
+                }
+            },
         };
 
         // Authoritative cap enforcement. From here on this request will be
@@ -3948,6 +4394,10 @@ pub async fn redirect_link(
 
         if let Some(url) = file_destination {
             return file_redirect(&url);
+        }
+        // The click above is the visit; the page that opens counts nothing.
+        if let Some(ticket) = media_ticket {
+            return page_redirect("m", &code, &ticket);
         }
         destination_redirect(&link.original_url)
     } else {
@@ -5054,6 +5504,20 @@ pub async fn replace_routing_rules(
             "A file link serves its file to every visitor and cannot have routing rules",
         );
     }
+    // A media link shows its one video to every visitor: rules would be
+    // stored and never followed.
+    if !payload.rules.is_empty() {
+        match crate::utils::media::media_of_link(&state.db, &link).await {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "A media link shows its video to every visitor and cannot have routing rules",
+                );
+            }
+            Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+        }
+    }
 
     if payload.rules.len() > MAX_ROUTING_RULES {
         return json_error(
@@ -5819,6 +6283,36 @@ pub async fn update_link(
         active_link.original_url = Set(validated_url);
     }
 
+    // The button under a media link's player. Checked before anything is
+    // written; applied in the transaction below.
+    let media_cta = match &payload.media_cta {
+        None => None,
+        Some(request) => {
+            if destination_changed {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "Changing a media link's destination ends its media page, so the button cannot be set in the same request",
+                );
+            }
+            match crate::utils::media::media_of_link(&state.db, &link).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "Only a media link has a button to set",
+                    );
+                }
+                Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+            }
+            match checked_media_cta(&state.db, request.label.as_deref(), request.url.as_deref())
+                .await
+            {
+                Ok(cta) => Some(cta),
+                Err(refusal) => return *refusal,
+            }
+        }
+    };
+
     if let Some(alias) = payload.custom_alias.as_deref().filter(|a| !a.is_empty())
         && alias != link.code
     {
@@ -6133,7 +6627,34 @@ pub async fn update_link(
     // In the same transaction as the new destination, so the row never
     // describes a destination the link no longer has.
     if destination_changed
-        && crate::utils::drive::forget_for_links(&txn, [&link])
+        && (crate::utils::drive::forget_for_links(&txn, [&link])
+            .await
+            .is_err()
+            // Nor is it the video its media row names: the link becomes an
+            // ordinary redirect to the new destination.
+            || crate::utils::media::forget_for_link(&txn, &link)
+                .await
+                .is_err())
+    {
+        let _ = txn.rollback().await;
+        state
+            .click_buffer
+            .add_pending_count(link.id, pending_to_fold)
+            .await;
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update link");
+    }
+    if let Some(cta) = &media_cta
+        && link_media::Entity::update_many()
+            .col_expr(
+                link_media::Column::CtaLabel,
+                Expr::value(cta.as_ref().map(|(label, _)| label.clone())),
+            )
+            .col_expr(
+                link_media::Column::CtaUrl,
+                Expr::value(cta.as_ref().map(|(_, url)| url.clone())),
+            )
+            .filter(link_media::Column::LinkId.eq(link.id))
+            .exec(&txn)
             .await
             .is_err()
     {
@@ -6205,6 +6726,7 @@ pub async fn update_link(
                 can_delete: None,
                 file: None,
                 drive: None,
+                media: None,
             }];
             // The update is committed; a failed lookup here only leaves the
             // file details off this one answer.
@@ -7236,6 +7758,31 @@ pub async fn clone_link(
             .await
             .is_err()
         {
+            let _ = txn.rollback().await;
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to clone link");
+        }
+    }
+
+    // A media link's clone is a media link: the same video and button under
+    // a new code. Without its row the clone would redirect to the video's
+    // host, which is not what was cloned. No query for any other link.
+    match crate::utils::media::media_of_link(&txn, &link).await {
+        Ok(None) => {}
+        Ok(Some(media)) => {
+            let copy = link_media::ActiveModel {
+                link_id: Set(new_id),
+                provider: Set(media.provider),
+                media_id: Set(media.media_id),
+                cta_label: Set(media.cta_label),
+                cta_url: Set(media.cta_url),
+                ..Default::default()
+            };
+            if link_media::Entity::insert(copy).exec(&txn).await.is_err() {
+                let _ = txn.rollback().await;
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to clone link");
+            }
+        }
+        Err(_) => {
             let _ = txn.rollback().await;
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to clone link");
         }

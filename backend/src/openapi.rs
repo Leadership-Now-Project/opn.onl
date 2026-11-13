@@ -47,6 +47,7 @@ spends one per URL and lists the URLs past the budget in `errors` instead of ans
 | Link password | 5 per minute per link, 20 per minute in total | `POST /{code}/verify`, and \
 `GET /{code}` with an `X-Link-Password` header |
 | Secure View | 10 per minute per link, 30 per minute in total | `POST /{code}/view` |
+| Media page | 120 per minute | `POST /{code}/media` |
 | Redirects | 100 per second | `GET /{code}`, `GET /{code}/preview`, `GET /{code}/view/file`, and \
 `GET` or `HEAD /report` |
 | General | 100 per minute | Every other request, including `GET`, `PUT`, and `DELETE` under \
@@ -180,6 +181,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
         secure_view::set_secure_view,
         secure_view::open_view,
         secure_view::view_file,
+        crate::handlers::media::open_media,
         links::toggle_pin,
         links::check_code_availability,
         links::check_url_health,
@@ -332,6 +334,13 @@ pub struct TooManyRequests(pub RateLimitResponse);
             links::LinkFileInfo,
             links::LinkDriveInfo,
             crate::utils::drive::DriveFileRef,
+            links::LinkMediaInfo,
+            links::MediaRequest,
+            links::MediaCtaRequest,
+            crate::handlers::media::OpenMediaRequest,
+            crate::handlers::media::OpenMediaResponse,
+            crate::handlers::media::MediaCta,
+            crate::handlers::media::MediaEmbed,
             files::StartUploadRequest,
             files::StartUploadResponse,
             files::CompleteUploadRequest,

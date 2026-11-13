@@ -40,6 +40,7 @@ async fn spawn_real_app() -> (axum_test::TestServer, DatabaseConnection) {
         report: roomy(),
         secure_view: roomy(),
         secure_view_ip: roomy(),
+        media_page: roomy(),
     });
     let server = axum_test::TestServer::new(build_router(state)).expect("test server");
     (server, db)

@@ -41,6 +41,7 @@ async fn app() -> (TestServer, DatabaseConnection) {
         report: roomy(),
         secure_view: roomy(),
         secure_view_ip: roomy(),
+        media_page: roomy(),
     });
     let server = TestServer::new(opn_onl_backend::build_router(state)).expect("test server");
     (server, db)

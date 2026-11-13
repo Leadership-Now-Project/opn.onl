@@ -885,6 +885,7 @@ pub async fn get_links_by_tag(
             can_delete: None,
             file: None,
             drive: None,
+            media: None,
         })
         .collect();
     crate::handlers::links::attach_file_info(&state.db, &links_list, &mut responses)
