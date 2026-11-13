@@ -285,6 +285,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
             auth::AppSettingsResponse,
             default_org::DefaultOrgInfo,
             auth::FileSharingInfo,
+            auth::DrivePickerInfo,
             auth::UserProfileResponse,
             auth::UpdateProfileRequest,
 
@@ -323,6 +324,8 @@ pub struct TooManyRequests(pub RateLimitResponse);
             links::LinksQuery,
             links::LinkResponse,
             links::LinkFileInfo,
+            links::LinkDriveInfo,
+            crate::utils::drive::DriveFileRef,
             files::StartUploadRequest,
             files::StartUploadResponse,
             files::CompleteUploadRequest,

@@ -301,6 +301,7 @@ export default function Dashboard() {
                 link.code.toLowerCase().includes(query) ||
                 link.original_url.toLowerCase().includes(query) ||
                 link.file?.filename.toLowerCase().includes(query) ||
+                link.drive?.name.toLowerCase().includes(query) ||
                 link.title?.toLowerCase().includes(query) ||
                 link.notes?.toLowerCase().includes(query) ||
                 link.tags.some(t => t.name.toLowerCase().includes(query))

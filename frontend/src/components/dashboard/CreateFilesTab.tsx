@@ -16,6 +16,7 @@ import { pluralize } from '../../utils/plural';
 import { putFile, UploadCancelled } from '../../utils/uploadFile';
 import AliasField from './AliasField';
 import { aliasProblem } from './aliasCheck';
+import DriveFilePanel from './DriveFilePanel';
 import type { AppSettings } from './types';
 
 interface CreateFilesTabProps {
@@ -35,17 +36,8 @@ const labelClass = 'block font-mono text-xs uppercase tracking-[0.14em] text-fai
 const fieldClass = 'w-full rounded-lg border border-line2 bg-surface px-4 py-2 text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint';
 const providerClass = 'flex w-full cursor-not-allowed items-center gap-3 rounded-lg border border-line2 bg-paper px-4 py-3 text-left text-sm font-semibold text-muted opacity-70';
 
-// Drawn here, not loaded: nothing on this tab talks to Google or Microsoft.
-function DriveMark() {
-    return (
-        <svg viewBox="0 0 24 22" width="22" height="20" aria-hidden="true">
-            <path d="M8 1h8l7.5 13h-8z" fill="#FBBC04" />
-            <path d="M8 1 .5 14l4 7L12 8z" fill="#34A853" />
-            <path d="M8 14h15.5l-4 7h-15z" fill="#4285F4" />
-        </svg>
-    );
-}
-
+// Drawn here, not loaded: showing the tab asks Microsoft and Google for
+// nothing. Google is reached only after a click on "Google Drive Files".
 function OneDriveMark() {
     return (
         <svg viewBox="0 0 24 16" width="24" height="16" aria-hidden="true">
@@ -55,7 +47,11 @@ function OneDriveMark() {
     );
 }
 
-/** Files tab of the create card: upload a file and share it as a short link. */
+/**
+ * Files tab of the create card: share a Google Drive file, or upload a file,
+ * as a short link. The two are set up separately on the server, so either can
+ * be offered without the other.
+ */
 export default function CreateFilesTab({ appSettings, active, onCreated, orgId = null, orgName = null }: CreateFilesTabProps) {
     const enabled = appSettings.files?.enabled === true;
     const maxBytes = appSettings.files?.max_bytes ?? 0;
@@ -96,10 +92,24 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
     // Leaving the page stops an upload in flight.
     useEffect(() => () => upload.current?.abort(), []);
 
+    const providers = (
+        <div className="space-y-2">
+            <DriveFilePanel appSettings={appSettings} onCreated={onCreated} orgId={orgId} />
+            <button type="button" disabled className={providerClass}>
+                <OneDriveMark />
+                <span className="flex-1">Microsoft OneDrive Files</span>
+                <span className="text-xs font-normal text-faint">Coming soon</span>
+            </button>
+        </div>
+    );
+
     if (!enabled) {
         return (
-            <div className="py-6 text-sm text-muted">
-                <p className="font-semibold text-ink">File sharing is not set up on this server.</p>
+            <div>
+                {appSettings.drive && providers}
+                <div className="py-6 text-sm text-muted">
+                    <p className="font-semibold text-ink">File sharing is not set up on this server.</p>
+                </div>
             </div>
         );
     }
@@ -214,18 +224,7 @@ export default function CreateFilesTab({ appSettings, active, onCreated, orgId =
             {orgId != null && orgName && (
                 <p className="mb-4 text-sm text-muted">Creating in {orgName}</p>
             )}
-            <div className="space-y-2">
-                <button type="button" disabled className={providerClass}>
-                    <DriveMark />
-                    <span className="flex-1">Google Drive Files</span>
-                    <span className="text-xs font-normal text-faint">Coming soon</span>
-                </button>
-                <button type="button" disabled className={providerClass}>
-                    <OneDriveMark />
-                    <span className="flex-1">Microsoft OneDrive Files</span>
-                    <span className="text-xs font-normal text-faint">Coming soon</span>
-                </button>
-            </div>
+            {providers}
 
             <form onSubmit={handleCreate} className="mt-5 border-t border-line2 pt-5">
                 <h3 className="mb-3 font-display text-base font-bold text-ink">Upload a File</h3>

@@ -7,6 +7,7 @@ import {
 import { motion } from 'framer-motion';
 import { shortLinkBase } from '../../config/api';
 import Sparkline from '../Sparkline';
+import DriveMark from './DriveMark';
 import MiniStats from './MiniStats';
 import { pluralize } from '../../utils/plural';
 import { formatBytes } from '../../utils/fileSize';
@@ -156,15 +157,32 @@ export default function LinkRow({
                                 </span>
                             ) : (
                                 <>
-                                    <a
-                                        href={link.original_url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="truncate max-w-[300px] font-mono text-sm text-muted transition-colors hover:text-ink hover:underline"
-                                        title={link.original_url}
-                                    >
-                                        {link.original_url.replace(/^https?:\/\//, '').substring(0, 50)}{link.original_url.length > 60 ? '...' : ''}
-                                    </a>
+                                    {link.drive ? (
+                                        // Made for a file in Google Drive:
+                                        // the file's name, linked to where
+                                        // it lives in Drive.
+                                        <a
+                                            href={link.original_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-flex min-w-0 max-w-[300px] items-center gap-1.5 text-sm text-muted transition-colors hover:text-ink hover:underline"
+                                            title={`${link.drive.name} (Google Drive)`}
+                                            data-drive-link={link.id}
+                                        >
+                                            <DriveMark size={16} label="Google Drive file" />
+                                            <span className="truncate font-medium text-ink">{link.drive.name}</span>
+                                        </a>
+                                    ) : (
+                                        <a
+                                            href={link.original_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="truncate max-w-[300px] font-mono text-sm text-muted transition-colors hover:text-ink hover:underline"
+                                            title={link.original_url}
+                                        >
+                                            {link.original_url.replace(/^https?:\/\//, '').substring(0, 50)}{link.original_url.length > 60 ? '...' : ''}
+                                        </a>
+                                    )}
                                     <button
                                         onClick={() => onCopySource(link)}
                                         className="rounded p-1 text-faint transition-colors hover:bg-line hover:text-ink"

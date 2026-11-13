@@ -389,6 +389,7 @@ pub async fn complete_upload(
         burn_after_reading: None,
         safe_link_interstitial: None,
         tag_ids: payload.tag_ids,
+        drive_file: None,
     };
     let response = insert_link(&state, Some(user_id), request, Some(&upload)).await;
     if response

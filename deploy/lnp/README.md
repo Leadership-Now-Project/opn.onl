@@ -23,6 +23,7 @@ Kept small so they carry across upstream releases:
 - `frontend/nginx.conf` and `frontend/Dockerfile`: an `include /etc/nginx/site.d/*.conf;` point (empty in the stock image), and the `CSP_GOOGLE_SIGN_IN` build arg, which adds Google's sign-in sources to the Content-Security-Policy. Only the dashboard image sets it; without it the policy is the stock one.
 - `frontend/themes/lnp.js` and `frontend/themes/lnp/public/` (new): the Leadership Now Project look (navy, grey, Plus Jakarta Sans, square corners, LNP logo and icons), applied only when the frontend is built with `VITE_THEME=lnp` (the dashboard image). `tailwind.config.js` merges it in; `src/index.css` takes its body colours and fonts from the config; `Logo.tsx` shows the LNP logo; the Dockerfile copies the theme's icons over the stock ones. `src/designTokens.lnp.test.ts` checks its colours for WCAG AA contrast.
 - File sharing (below, "File sharing"): `backend/src/utils/files/` (the `FileStore` trait, its S3 and in-memory implementations, how a file is served, the sweep), `backend/src/handlers/files.rs` (`/files/uploads`, `/files/uploads/{id}/complete`, `/files/usage`), the `link_files` table, and `links.rs`, where `POST /links` and completing an upload share `insert_link` and `GET /{code}` signs a file link's address. A file link is a link whose `original_url` is the marker `opn-file:<id>`; the API shows it as an empty URL plus a `file` object. Frontend: `CreateFilesTab.tsx`, `AliasField.tsx` (the alias control, taken out of `CreateLinkForm.tsx` so both tabs use it), and the file row in `LinkRow.tsx`. `frontend/Dockerfile` takes `CSP_FILES_UPLOAD_ORIGIN`. Off unless `FILES_S3_BUCKET` is set; the `/files` routes answer 404 then.
+- Google Drive links (below, "Google Drive picker"): `frontend/src/utils/googleDrive.ts` (the Drive token, Google's picker, the two Drive calls), `DriveFilePanel.tsx` (the "Google Drive Files" button and its confirmation panel) and the Drive row in `LinkRow.tsx`. Backend: `utils/drive.rs`, the `link_drive_files` table, an optional `drive_file` on `POST /links`, `drive` on every link answer, and `drive` in `GET /auth/settings`. A Drive link is an ordinary URL link to the file's address in Drive. `frontend/Dockerfile` takes `CSP_GOOGLE_DRIVE_PICKER`. Off unless `GOOGLE_PICKER_API_KEY` and `GOOGLE_PICKER_APP_ID` are set.
 - `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only. `deploy/lnp/mcp/` is the Claude connector (below); it uses the published `opn-mcp` package unchanged.
 
 The first account to sign in becomes the instance admin.
@@ -164,6 +165,30 @@ The dashboard's Content-Security-Policy must allow the upload. Set the repositor
 Turning it on, in this order: create the bucket (steps 1 to 4), set the repository variable, build and deploy an image tag, then add the `FILES_*` settings to `.env` and `docker compose up -d`. Check with one small PDF and one `.html` file: the PDF opens in the browser, the HTML file downloads.
 
 To turn it off, blank `FILES_S3_BUCKET`. Existing file links then answer "This file is no longer available" and their files stay in the bucket until it is set again.
+
+## Google Drive picker
+
+On the **Files** tab, "Google Drive Files" opens Google's own file picker. The person picks one file and gets a short link (`https://ldr.now/<code>`) that redirects to the file where it lives in Drive: nothing is copied, so the link always opens the current version. Off until `GOOGLE_PICKER_API_KEY` and `GOOGLE_PICKER_APP_ID` are both set (and Google sign-in is on): the button then says it is not set up, and nothing else changes.
+
+How it works:
+
+- Everything that talks to Google runs in the person's browser. The app server never receives a Google token; it stores the link and which Drive file it was made for (`link_drive_files`).
+- The first click asks the person, in Google's window, to let LNP Links see the files they pick with it (the `drive.file` scope, and no other). It cannot list or read the rest of their Drive. Google remembers the answer, so later clicks go straight to the picker.
+- After picking, the panel shows who can open the file ("Anyone with the link can view", "Only people at <domain> with the link", "Restricted"). If outsiders would be locked out it says so and offers a tick box, unticked, "Change to: anyone with the link can view". Sharing is changed only when that box is ticked and Create is clicked, and the link is not made if Google refuses the change (a Workspace sharing policy, a shared-drive rule). Left unticked, the link is still made and the panel says recipients may have to request access.
+- The link is an ordinary one: it can be edited, cloned, tagged, given an expiry or a password. Changing its destination makes it a plain URL link. Deleting it does nothing to the file in Drive.
+
+Google Cloud, project `lnp-links` (the same project as Google sign-in):
+
+1. **APIs and services, Library**: enable **Google Picker API** and **Google Drive API**.
+2. **Credentials, Create credentials, API key**. Restrict it: under *Application restrictions* choose **Websites** and add `https://links.leadershipnowproject.com/*`; under *API restrictions* choose **Restrict key** and tick **Google Picker API** only. This is a browser key, visible to anyone who signs in to the dashboard; the two restrictions are what make that safe. Put it in `.env` as `GOOGLE_PICKER_API_KEY`.
+3. `GOOGLE_PICKER_APP_ID` is the project **number** (Cloud console, project picker or IAM and admin, Settings), not its name or id.
+4. The OAuth consent screen stays **Internal**, and the OAuth client is the one sign-in already uses: its authorised JavaScript origin `https://links.leadershipnowproject.com` covers the picker. The only scope asked for is `https://www.googleapis.com/auth/drive.file`, which Google classes as non-sensitive.
+
+The dashboard's Content-Security-Policy must allow the picker: `lnp-images.yml` builds the dashboard image with `CSP_GOOGLE_DRIVE_PICKER=true`, which adds `https://apis.google.com` to `script-src`, `https://www.googleapis.com` to `connect-src` and `https://docs.google.com` to `frame-src`. An image built before that change shows the button and the browser blocks the picker.
+
+Turning it on: deploy an image tag built from this version, add the two settings to `.env`, `docker compose up -d`. Check with a file only you can open (the panel warns, the box is unticked, and the link made without ticking it asks an outsider to request access) and with one that anyone with the link can view.
+
+To turn it off, blank either setting. Links already made keep working: they are ordinary links.
 
 ## Claude connector
 

@@ -56,7 +56,7 @@ RUN set -e; \
         G_SCRIPT=" https://accounts.google.com/gsi/client"; \
         G_STYLE=" https://accounts.google.com/gsi/style"; \
         G_CONNECT=" https://accounts.google.com/gsi/"; \
-        G_FRAME=" frame-src https://accounts.google.com/gsi/;"; \
+        G_FRAME=" frame-src https://accounts.google.com/gsi/__CSP_DRIVE_FRAME__;"; \
     elif [ -z "$CSP_GOOGLE_SIGN_IN" ] || [ "$CSP_GOOGLE_SIGN_IN" = "false" ]; then \
         G_SCRIPT=""; G_STYLE=""; G_CONNECT=""; G_FRAME=""; \
     else \
@@ -103,6 +103,49 @@ RUN set -e; \
         exit 1; \
     fi; \
     echo "CSP file upload origin: '${F_CONNECT}'"
+
+# "Google Drive Files" on the dashboard's Files tab (src/utils/googleDrive.ts)
+# opens Google's file picker and asks the Drive API about the file picked:
+# the API loader script and the picker module it fetches (apis.google.com),
+# the picker's frame (docs.google.com/picker) and the Drive API itself
+# (www.googleapis.com). Only a dashboard image for a deployment with the picker
+# sets CSP_GOOGLE_DRIVE_PICKER=true; without it every placeholder becomes
+# nothing and the policy is exactly what it was. The picker is used with the
+# Google sign-in above, whose frame-src directive it adds its frame to, so
+# turning it on without CSP_GOOGLE_SIGN_IN=true does not build.
+ARG CSP_GOOGLE_DRIVE_PICKER
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    for NAME in SCRIPT CONNECT; do \
+        if ! grep -q "__CSP_DRIVE_${NAME}__" "$CONF"; then \
+            echo "ERROR: __CSP_DRIVE_${NAME}__ placeholder not found in nginx.conf"; \
+            exit 1; \
+        fi; \
+    done; \
+    if [ "$CSP_GOOGLE_DRIVE_PICKER" = "true" ]; then \
+        if ! grep -q '__CSP_DRIVE_FRAME__' "$CONF"; then \
+            echo "ERROR: CSP_GOOGLE_DRIVE_PICKER=true needs CSP_GOOGLE_SIGN_IN=true"; \
+            exit 1; \
+        fi; \
+        D_SCRIPT=" https://apis.google.com"; \
+        D_CONNECT=" https://www.googleapis.com"; \
+        D_FRAME=" https://docs.google.com"; \
+    elif [ -z "$CSP_GOOGLE_DRIVE_PICKER" ] || [ "$CSP_GOOGLE_DRIVE_PICKER" = "false" ]; then \
+        D_SCRIPT=""; D_CONNECT=""; D_FRAME=""; \
+    else \
+        echo "ERROR: CSP_GOOGLE_DRIVE_PICKER must be true, false or unset, not '$CSP_GOOGLE_DRIVE_PICKER'"; \
+        exit 1; \
+    fi; \
+    sed -i \
+        -e "s#__CSP_DRIVE_SCRIPT__#${D_SCRIPT}#g" \
+        -e "s#__CSP_DRIVE_CONNECT__#${D_CONNECT}#g" \
+        -e "s#__CSP_DRIVE_FRAME__#${D_FRAME}#g" \
+        "$CONF"; \
+    if grep -q '__CSP_DRIVE_' "$CONF"; then \
+        echo "ERROR: a __CSP_DRIVE_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP Google Drive picker sources: '${D_SCRIPT}'"
 
 # Build stage - use full Node image for Puppeteer/Chromium support
 FROM node:22-slim AS builder

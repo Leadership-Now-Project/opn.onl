@@ -767,6 +767,7 @@ pub async fn get_folder_links(
             created_by: None,
             can_delete: None,
             file: None,
+            drive: None,
         });
     }
     crate::handlers::links::attach_file_info(&state.db, &links_list, &mut responses)

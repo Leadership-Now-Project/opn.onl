@@ -27,6 +27,13 @@ export interface LinkData {
     can_delete?: boolean;
     /** The uploaded file a file link serves. `original_url` is then empty. */
     file?: LinkFile | null;
+    /** The Google Drive file the link was made for. `original_url` is its address in Drive. */
+    drive?: LinkDriveFile | null;
+}
+
+export interface LinkDriveFile {
+    name: string;
+    mime_type: string;
 }
 
 export interface LinkFile {
@@ -77,6 +84,10 @@ export interface AppSettings {
     default_org?: { id: number; name: string } | null;
     /** File sharing. Absent on a server with no storage for uploaded files. */
     files?: { enabled: boolean; max_bytes: number } | null;
+    /** Google sign-in's client id. Absent on a server that does not sign people in with Google. */
+    google_client_id?: string | null;
+    /** Google's file picker. Absent on a server where it is not set up. */
+    drive?: { api_key: string; app_id: string } | null;
 }
 
 export type LinkSortBy = 'date' | 'clicks';

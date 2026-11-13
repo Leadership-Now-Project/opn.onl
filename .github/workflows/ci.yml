@@ -383,6 +383,22 @@ jobs:
             exit 1
           fi
 
+          # And for the Google Drive picker: a build arg only a dashboard image
+          # with the picker sets. A stock build keeps no placeholder and names
+          # none of its hosts.
+          if printf '%s\n' "$headers" | grep -Fq '__CSP_DRIVE_'; then
+            echo "a stock build's headers still carry a __CSP_DRIVE_ placeholder"
+            exit 1
+          fi
+          if docker exec "$container_id" grep -Rq '__CSP_DRIVE_' /etc/nginx/conf.d; then
+            echo "a stock build's nginx config still carries a __CSP_DRIVE_ placeholder"
+            exit 1
+          fi
+          if docker exec "$container_id" grep -Rq -e 'apis.google.com' -e 'googleapis.com' -e 'docs.google.com' /etc/nginx/conf.d; then
+            echo "a stock build's nginx config names a Google Drive picker host"
+            exit 1
+          fi
+
       - name: Verify the Google sign-in CSP build arg
         run: |
           docker build \
@@ -421,6 +437,15 @@ jobs:
             fi
             if printf '%s\n' "$google_headers" | grep -Fq '__CSP_GOOGLE_'; then
               echo "the headers for ${path} still carry a __CSP_GOOGLE_ placeholder"
+              exit 1
+            fi
+            # Sign-in alone allows nothing of the Drive picker.
+            if printf '%s\n' "$google_headers" | grep -Fq '__CSP_DRIVE_'; then
+              echo "the headers for ${path} still carry a __CSP_DRIVE_ placeholder"
+              exit 1
+            fi
+            if printf '%s\n' "$google_headers" | grep -iq -e 'apis.google.com' -e 'googleapis.com' -e 'docs.google.com'; then
+              echo "the Google sign-in policy for ${path} names a Google Drive picker host"
               exit 1
             fi
           done
@@ -493,6 +518,72 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Verify the Google Drive picker CSP build arg
+        run: |
+          # The LNP dashboard image: Google sign-in, file sharing and the
+          # Drive picker together.
+          docker build \
+            --file frontend/Dockerfile \
+            --target csp-config \
+            --build-arg VITE_API_URL=https://api.smoke.test \
+            --build-arg CSP_GOOGLE_SIGN_IN=true \
+            --build-arg CSP_FILES_UPLOAD_ORIGIN=https://files-smoke.s3.us-east-2.amazonaws.com \
+            --build-arg CSP_GOOGLE_DRIVE_PICKER=true \
+            --tag opn-frontend-csp-drive-smoke \
+            frontend
+          container_id=$(docker run --detach --publish 127.0.0.1:8084:80 opn-frontend-csp-drive-smoke)
+          trap 'docker rm --force "$container_id"' EXIT
+          docker exec "$container_id" sh -c '
+            mkdir -p /usr/share/nginx/html/assets
+            printf "ok\n" > /usr/share/nginx/html/assets/app-deadbeef.js
+            printf "ok\n" > /usr/share/nginx/html/robots.txt
+          '
+          for attempt in $(seq 1 20); do
+            if headers=$(curl --fail --silent --show-error --head http://127.0.0.1:8084/); then
+              break
+            fi
+            sleep 1
+          done
+          test -n "${headers:-}"
+
+          # All three copies of the policy (HTML, /assets/, public files) must
+          # agree: each picker source once, in its own directive and nowhere else.
+          for path in / /assets/app-deadbeef.js /robots.txt; do
+            drive_headers=$(curl --fail --silent --show-error --head "http://127.0.0.1:8084${path}")
+            printf '%s\n' "$drive_headers" | grep -iF "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://static.cloudflareinsights.com https://accounts.google.com/gsi/client https://apis.google.com; style-src"
+            printf '%s\n' "$drive_headers" | grep -iF "connect-src 'self' https://api.smoke.test wss://api.smoke.test https://www.google-analytics.com https://region1.google-analytics.com https://www.google.com https://cloudflareinsights.com https://accounts.google.com/gsi/ https://files-smoke.s3.us-east-2.amazonaws.com https://www.googleapis.com; frame-src https://accounts.google.com/gsi/ https://docs.google.com; frame-ancestors 'self';"
+            test "$(printf '%s\n' "$drive_headers" | grep -io 'https://apis.google.com' | wc -l)" -eq 1
+            test "$(printf '%s\n' "$drive_headers" | grep -io 'https://www.googleapis.com' | wc -l)" -eq 1
+            test "$(printf '%s\n' "$drive_headers" | grep -io 'https://docs.google.com' | wc -l)" -eq 1
+            if printf '%s\n' "$drive_headers" | grep -iF "unsafe-eval"; then
+              echo "the Google Drive picker policy for ${path} allows unsafe-eval"
+              exit 1
+            fi
+            if printf '%s\n' "$drive_headers" | grep -Fq '__CSP_DRIVE_'; then
+              echo "the headers for ${path} still carry a __CSP_DRIVE_ placeholder"
+              exit 1
+            fi
+          done
+          if docker exec "$container_id" grep -Rq '__CSP_DRIVE_' /etc/nginx/conf.d; then
+            echo "the Google Drive picker nginx config still carries a __CSP_DRIVE_ placeholder"
+            exit 1
+          fi
+
+          # Anything but true/false/unset is a typo, not "off".
+          if docker build --file frontend/Dockerfile --target csp-config \
+              --build-arg CSP_GOOGLE_SIGN_IN=true \
+              --build-arg CSP_GOOGLE_DRIVE_PICKER=yes --tag opn-frontend-csp-drive-typo frontend; then
+            echo "a mistyped CSP_GOOGLE_DRIVE_PICKER built an image"
+            exit 1
+          fi
+          # The picker adds its frame to Google sign-in's frame-src, so it
+          # cannot be turned on alone.
+          if docker build --file frontend/Dockerfile --target csp-config \
+              --build-arg CSP_GOOGLE_DRIVE_PICKER=true --tag opn-frontend-csp-drive-alone frontend; then
+            echo "CSP_GOOGLE_DRIVE_PICKER=true built an image without CSP_GOOGLE_SIGN_IN=true"
+            exit 1
+          fi
 
   e2e:
     name: E2E (Playwright, Chromium)

@@ -6,6 +6,7 @@ pub mod blocked_email_domains;
 pub mod blocked_links;
 pub mod click_events;
 pub mod folders;
+pub mod link_drive_files;
 pub mod link_files;
 pub mod link_tags;
 pub mod links;

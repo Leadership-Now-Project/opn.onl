@@ -21,7 +21,8 @@ use validator::Validate;
 
 use crate::AppState;
 use crate::entity::{
-    blocked_domains, blocked_links, click_events, link_files, link_tags, links, tags, users,
+    blocked_domains, blocked_links, click_events, link_drive_files, link_files, link_tags, links,
+    tags, users,
 };
 use crate::handlers::link_access::{
     CallerAccess, LinkAction, count_own_live_links, created_by, listed_links, live_link_for,
@@ -29,6 +30,7 @@ use crate::handlers::link_access::{
 };
 use crate::handlers::websocket::ClickEvent;
 use crate::handlers::{json_error, verification_satisfied};
+use crate::utils::drive::DriveFileRef;
 use crate::utils::env::env_flag;
 use crate::utils::geoip::{GeoLocation, UserAgentInfo, lookup_ip, parse_user_agent};
 use crate::utils::jwt::{PASSWORD_TOO_LONG, decode_jwt, password_exceeds_bcrypt_limit};
@@ -989,6 +991,10 @@ pub struct CreateLinkRequest {
     pub burn_after_reading: Option<bool>,
     pub safe_link_interstitial: Option<bool>,
     pub tag_ids: Option<Vec<i32>>,
+    /// The Google Drive file `original_url` is the address of, when the link
+    /// was made by picking a file in Drive. The destination must then be an
+    /// `https` address on `docs.google.com` or `drive.google.com`.
+    pub drive_file: Option<DriveFileRef>,
 }
 
 #[derive(Deserialize, Validate, ToSchema)]
@@ -1254,6 +1260,18 @@ pub struct LinkResponse {
     /// address a visitor is sent to is signed per visit and never listed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<LinkFileInfo>,
+    /// The Google Drive file this link was made for. `original_url` is that
+    /// file's address in Drive; the link redirects like any other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive: Option<LinkDriveInfo>,
+}
+
+/// What a link list shows of the Google Drive file a link was made for.
+#[derive(Serialize, ToSchema, Clone, Debug, PartialEq)]
+pub struct LinkDriveInfo {
+    /// The file's name in Drive when it was picked.
+    pub name: String,
+    pub mime_type: String,
 }
 
 /// What a link list shows of an uploaded file. Never where it is stored.
@@ -1275,18 +1293,25 @@ impl LinkFileInfo {
     }
 }
 
-/// Fill in `file` on the responses whose link serves an uploaded file. One
-/// query for the page, and none at all when no link on it is a file link.
+/// Fill in `file` on the responses whose link serves an uploaded file, and
+/// `drive` on those made for a Google Drive file. One query each for the page,
+/// and none at all when no link on it is a file link or points into Drive.
 pub(crate) async fn attach_file_info<'a, C: ConnectionTrait>(
     db: &C,
     rows: impl IntoIterator<Item = &'a links::Model>,
     responses: &mut [LinkResponse],
 ) -> Result<(), DbErr> {
-    let file_link_ids: Vec<i32> = rows
-        .into_iter()
-        .filter(|link| link.is_file())
-        .map(|link| link.id)
-        .collect();
+    let mut file_link_ids: Vec<i32> = Vec::new();
+    let mut drive_link_ids: Vec<i32> = Vec::new();
+    for link in rows {
+        if link.is_file() {
+            file_link_ids.push(link.id);
+        } else if crate::utils::drive::is_drive_url(&link.original_url) {
+            // Only a link that points into Drive can have a row.
+            drive_link_ids.push(link.id);
+        }
+    }
+    attach_drive_info(db, &drive_link_ids, responses).await?;
     if file_link_ids.is_empty() {
         return Ok(());
     }
@@ -1305,6 +1330,38 @@ pub(crate) async fn attach_file_info<'a, C: ConnectionTrait>(
     for response in responses {
         if let Some(info) = by_link.remove(&response.id) {
             response.file = Some(info);
+        }
+    }
+    Ok(())
+}
+
+async fn attach_drive_info<C: ConnectionTrait>(
+    db: &C,
+    drive_link_ids: &[i32],
+    responses: &mut [LinkResponse],
+) -> Result<(), DbErr> {
+    if drive_link_ids.is_empty() {
+        return Ok(());
+    }
+    let mut by_link: HashMap<i32, LinkDriveInfo> = HashMap::new();
+    for chunk in drive_link_ids.chunks(TAG_LOOKUP_CHUNK) {
+        let rows = link_drive_files::Entity::find()
+            .filter(link_drive_files::Column::LinkId.is_in(chunk.to_vec()))
+            .all(db)
+            .await?;
+        for row in rows {
+            by_link.insert(
+                row.link_id,
+                LinkDriveInfo {
+                    name: row.name,
+                    mime_type: row.mime_type,
+                },
+            );
+        }
+    }
+    for response in responses {
+        if let Some(info) = by_link.remove(&response.id) {
+            response.drive = Some(info);
         }
     }
     Ok(())
@@ -1344,6 +1401,7 @@ impl LinkResponse {
             created_by: None,
             can_delete: None,
             file: None,
+            drive: None,
         }
     }
 }
@@ -2380,6 +2438,24 @@ pub(crate) async fn insert_link(
         }
     };
 
+    // A link made by picking a file in Google Drive. The row it leaves says
+    // "this link is that Drive file", so the destination has to be in Drive.
+    let drive_file = match payload.drive_file.take() {
+        None => None,
+        Some(drive_file) => {
+            if !crate::utils::drive::is_drive_url(&validated_url) {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "A Google Drive link must point to docs.google.com or drive.google.com over https",
+                );
+            }
+            match drive_file.checked() {
+                Ok(checked) => Some(checked),
+                Err(reason) => return json_error(StatusCode::BAD_REQUEST, reason),
+            }
+        }
+    };
+
     // An empty password is no password. The unlock form will not submit an
     // empty field, so a link "protected" by "" could never be opened from the
     // UI; the dashboard already omits the field instead of sending "".
@@ -2745,6 +2821,26 @@ pub(crate) async fn insert_link(
         }
     }
 
+    // Which Drive file the link is for, in the transaction that made the link.
+    if let Some(drive_file) = &drive_file {
+        let row = link_drive_files::ActiveModel {
+            link_id: Set(link_id),
+            file_id: Set(drive_file.file_id.clone()),
+            name: Set(drive_file.name.clone()),
+            mime_type: Set(drive_file.mime_type.clone()),
+            created_by: Set(user_id),
+            ..Default::default()
+        };
+        if link_drive_files::Entity::insert(row)
+            .exec(&txn)
+            .await
+            .is_err()
+        {
+            let _ = txn.rollback().await;
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+        }
+    }
+
     for tag_id in tag_ids {
         let link_tag = link_tags::ActiveModel {
             link_id: Set(link_id),
@@ -2818,6 +2914,10 @@ pub(crate) async fn insert_link(
             created_by: None,
             can_delete: None,
             file: file.map(LinkFileInfo::of),
+            drive: drive_file.map(|drive_file| LinkDriveInfo {
+                name: drive_file.name,
+                mime_type: drive_file.mime_type,
+            }),
         }),
     )
         .into_response()
@@ -5227,6 +5327,9 @@ pub async fn delete_link(
                 .await
                 .remove(&state)
                 .await;
+            // Nothing is kept about the Drive file of a deleted link. A failure
+            // here does not undo the delete: the row goes when the link is purged.
+            let _ = crate::utils::drive::forget_for_links(&state.db, [&link]).await;
             if invalidate_cached_code_required(&state, &link.code)
                 .await
                 .is_err()
@@ -5506,6 +5609,7 @@ pub async fn update_link(
         );
     }
 
+    let mut destination_changed = false;
     if let Some(ref url) = payload.original_url
         && !link.is_file()
     {
@@ -5523,6 +5627,8 @@ pub async fn update_link(
         if let Err(e) = ensure_public_destination(&validated_url).await {
             return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response();
         }
+        // A new destination is no longer the Drive file the link was made for.
+        destination_changed = validated_url != link.original_url;
         active_link.original_url = Set(validated_url);
     }
 
@@ -5837,6 +5943,21 @@ pub async fn update_link(
             .into_response();
     }
 
+    // In the same transaction as the new destination, so the row never
+    // describes a destination the link no longer has.
+    if destination_changed
+        && crate::utils::drive::forget_for_links(&txn, [&link])
+            .await
+            .is_err()
+    {
+        let _ = txn.rollback().await;
+        state
+            .click_buffer
+            .add_pending_count(link.id, pending_to_fold)
+            .await;
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update link");
+    }
+
     match active_link.update(&txn).await {
         Ok(updated) => {
             if txn.commit().await.is_err() {
@@ -5896,6 +6017,7 @@ pub async fn update_link(
                 created_by: None,
                 can_delete: None,
                 file: None,
+                drive: None,
             }];
             // The update is committed; a failed lookup here only leaves the
             // file details off this one answer.
@@ -6297,13 +6419,15 @@ pub async fn bulk_delete_links(
         {
             // Soft delete instead of hard delete
             let code = link.code.clone();
-            let mut active_link: links::ActiveModel = link.into();
+            let mut active_link: links::ActiveModel = link.clone().into();
             active_link.deleted_at = Set(Some(chrono::Utc::now().naive_utc()));
 
             if active_link.update(&state.db).await.is_ok() {
                 deleted += 1;
                 invalidated.push(code);
                 deleted_ids.push(id);
+                // See `delete_link`.
+                let _ = crate::utils::drive::forget_for_links(&state.db, [&link]).await;
             }
         }
     }

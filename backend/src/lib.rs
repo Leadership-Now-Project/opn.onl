@@ -53,6 +53,11 @@ pub struct AppState {
     /// until `FILES_S3_BUCKET` is set; the `/files` routes then answer 404
     /// and nothing else behaves differently.
     pub files: Option<utils::files::FileSharing>,
+    /// Google's file picker for the dashboard's "Google Drive Files" button.
+    /// `None` until `GOOGLE_PICKER_API_KEY` and `GOOGLE_PICKER_APP_ID` are set
+    /// on an instance with Google sign-in; `GET /auth/settings` then has no
+    /// `drive` entry and nothing else behaves differently.
+    pub drive: Option<utils::drive::DrivePicker>,
 }
 
 impl AppState {
@@ -75,6 +80,8 @@ impl AppState {
             // Off, as on an instance without a bucket. A test that needs file
             // sharing sets this to a `MemoryFileStore`.
             files: None,
+            // Off, as on an instance without the picker settings.
+            drive: None,
         }
     }
 }

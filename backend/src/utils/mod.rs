@@ -3,6 +3,7 @@ pub mod backup;
 pub mod cache;
 pub mod click_buffer;
 pub mod database_url;
+pub mod drive;
 pub mod email;
 pub mod email_domain_policy;
 pub mod email_limits;

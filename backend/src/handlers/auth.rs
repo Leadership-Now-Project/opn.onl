@@ -1731,6 +1731,20 @@ pub struct AppSettingsResponse {
     /// files (`FILES_S3_BUCKET`); the dashboard's Files tab then offers upload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<FileSharingInfo>,
+    /// Google's file picker. Present only when `GOOGLE_PICKER_API_KEY` and
+    /// `GOOGLE_PICKER_APP_ID` are set and Google sign-in is configured; the
+    /// Files tab then offers "Google Drive Files".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive: Option<DrivePickerInfo>,
+}
+
+/// What the browser opens Google's file picker with. Both values are public
+/// by design: the key is a browser key restricted to the dashboard's address.
+#[derive(Serialize, ToSchema)]
+pub struct DrivePickerInfo {
+    pub api_key: String,
+    /// The Google Cloud project number.
+    pub app_id: String,
 }
 
 /// What a client needs to know about file sharing before it uploads.
@@ -1828,6 +1842,10 @@ pub async fn get_app_settings(State(state): State<AppState>) -> impl IntoRespons
             files: state.files.as_ref().map(|files| FileSharingInfo {
                 enabled: true,
                 max_bytes: files.max_bytes,
+            }),
+            drive: state.drive.as_ref().map(|drive| DrivePickerInfo {
+                api_key: drive.api_key.clone(),
+                app_id: drive.app_id.clone(),
             }),
             google_client_id: crate::handlers::google_auth::configured_client_id(),
             default_org: crate::handlers::default_org::settings_info(&state.db).await,

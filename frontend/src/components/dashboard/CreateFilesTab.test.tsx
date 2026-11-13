@@ -106,16 +106,16 @@ describe('CreateFilesTab', () => {
         expect(global.fetch).not.toHaveBeenCalled();
     });
 
-    it('offers the two providers as coming soon, both disabled, and the upload', async () => {
+    it('offers the two providers, both disabled on a server without the Drive picker, and the upload', async () => {
         mockApi();
         renderTab();
 
         const drive = screen.getByRole('button', { name: /Google Drive Files/ });
         const oneDrive = screen.getByRole('button', { name: /Microsoft OneDrive Files/ });
-        for (const button of [drive, oneDrive]) {
-            expect(button).toBeDisabled();
-            expect(button).toHaveTextContent('Coming soon');
-        }
+        expect(drive).toBeDisabled();
+        expect(drive).toHaveTextContent('Not set up on this server');
+        expect(oneDrive).toBeDisabled();
+        expect(oneDrive).toHaveTextContent('Coming soon');
         expect(screen.getByRole('heading', { name: 'Upload a File' })).toBeVisible();
         expect(screen.getByText('Any type, up to 10 MB')).toBeVisible();
         // Idle: nothing to create yet, and no link fields until a file is chosen.

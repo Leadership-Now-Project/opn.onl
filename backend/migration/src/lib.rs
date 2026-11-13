@@ -47,6 +47,7 @@ mod m20220101_000046_link_list_order_indexes;
 mod m20220101_000047_link_expiry_notices;
 mod m20220101_000048_click_destination;
 mod m20220101_000049_link_files;
+mod m20220101_000050_link_drive_files;
 
 // Public so the backend's tests can pin its blocklist canonicalisation to the
 // frozen copy this migration applies to existing rows.
@@ -109,6 +110,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000047_link_expiry_notices::Migration),
             Box::new(m20220101_000048_click_destination::Migration),
             Box::new(m20220101_000049_link_files::Migration),
+            Box::new(m20220101_000050_link_drive_files::Migration),
         ]
     }
 }

@@ -10,6 +10,9 @@ name: LNP images
 # origin (https://<bucket>.s3.<region>.amazonaws.com). The dashboard image's
 # Content-Security-Policy allows uploads to it; while the variable is unset
 # the policy is the stock one and the Files tab cannot upload.
+#
+# The dashboard image's policy also allows Google's file picker and the Drive
+# API (CSP_GOOGLE_DRIVE_PICKER), for "Google Drive Files" on the Files tab.
 
 on:
   push:
@@ -55,6 +58,7 @@ jobs:
               VITE_FRONTEND_URL=https://ldr.now
               CSP_GOOGLE_SIGN_IN=true
               CSP_FILES_UPLOAD_ORIGIN=${{ vars.LNP_FILES_UPLOAD_ORIGIN }}
+              CSP_GOOGLE_DRIVE_PICKER=true
               VITE_THEME=lnp
           - image: opn-mcp-remote
             context: deploy/lnp/mcp

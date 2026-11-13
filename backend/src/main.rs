@@ -148,6 +148,7 @@ async fn main() {
         ),
         require_email_verification,
         files,
+        drive: utils::drive::DrivePicker::from_env(),
     };
 
     // Handles for the graceful-shutdown flush (so buffered clicks aren't lost on
