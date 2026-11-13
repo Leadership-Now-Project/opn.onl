@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
     ctaFields,
     ctaProblem,
+    embedHref,
+    httpsHref,
     isAllowedEmbedSrc,
     isHttpsUrl,
     isVideoMime,
@@ -89,6 +91,13 @@ describe('parseMediaUrl', () => {
         'https://vimeo.com/76979871a',
         'https://vimeo.com/76979871/ABC123DEF0',
         'https://vimeo.com/76979871/abc',
+        // Pages under a video's number, not an unlisted video's hash.
+        'https://vimeo.com/76979871/settings',
+        'https://vimeo.com/76979871/collections',
+        'https://vimeo.com/76979871/videos',
+        'https://vimeo.com/76979871/likes',
+        'https://vimeo.com/76979871?h=settings',
+        'https://player.vimeo.com/video/76979871?h=settings',
         'https://vimeo.com/76979871?h=abc123def0&h=ffffffffff',
         'https://youtu.be/dQw4w9WgXcQ\n',
         'https://youtu.be/dQw4\tw9WgXcQ',
@@ -120,6 +129,11 @@ describe('isAllowedEmbedSrc', () => {
         'https://docs.google.com/file/d/x/preview',
         '//player.vimeo.com/video/1',
         '/embed/dQw4w9WgXcQ',
+        // These parse as Vimeo's player, and a frame would resolve them
+        // against the page they are on.
+        'https:player.vimeo.com/video/1',
+        'https:/player.vimeo.com/video/1',
+        ' https://player.vimeo.com/video/1',
         'javascript:alert(1)',
         'data:text/html,<script>alert(1)</script>',
         'https://player.vimeo.com/video/1\n',
@@ -130,6 +144,14 @@ describe('isAllowedEmbedSrc', () => {
         { src: 'https://player.vimeo.com/video/1' },
     ])('refuses %j', (src) => {
         expect(isAllowedEmbedSrc(src)).toBe(false);
+        expect(embedHref(src)).toBeNull();
+    });
+
+    it('gives the address to frame in the URL parser\'s own spelling', () => {
+        expect(embedHref('https://player.vimeo.com/video/76979871?h=abc123def0'))
+            .toBe('https://player.vimeo.com/video/76979871?h=abc123def0');
+        expect(embedHref('https://player.vimeo.com\\video\\76979871')).toBe('https://player.vimeo.com/video/76979871');
+        expect(embedHref('https://DRIVE.google.com/file/d/x/preview')).toBe('https://drive.google.com/file/d/x/preview');
     });
 });
 
@@ -158,6 +180,30 @@ describe('the button', () => {
         expect(ctaProblem('Go', url)).toMatch(/https:\/\//);
         expect(isHttpsUrl(url)).toBe(false);
     });
+
+    // Typed without its two slashes a link parses as the same host, but an
+    // anchor would resolve the text against the page. The address used is
+    // the parsed one; the server stores that spelling too (`cta_href`).
+    it.each([
+        ['https:example.org', 'https://example.org/'],
+        ['https:/example.org/join', 'https://example.org/join'],
+        ['https:\\\\example.org\\join', 'https://example.org/join'],
+        ['HTTPS://Example.ORG/Join?a=1#b', 'https://example.org/Join?a=1#b'],
+        [' https://example.org/join ', 'https://example.org/join'],
+        ['https://example.org:443/x', 'https://example.org/x'],
+    ])('reads the link %j as %s', (typed, href) => {
+        expect(httpsHref(typed)).toBe(href);
+        expect(isHttpsUrl(typed)).toBe(true);
+        expect(ctaProblem('Go', typed)).toBe('');
+        expect(httpsHref(href)).toBe(href);
+    });
+
+    it.each(['https:', 'https:/', 'https:///', 'http:example.org', 'https://exa\tmple.org/', '', null, undefined, 7])(
+        'has no address for %j',
+        (url) => {
+            expect(httpsHref(url)).toBeNull();
+        },
+    );
 
     it('is sent trimmed, and not at all when empty', () => {
         expect(ctaFields(' Join ', ' https://example.org/ ')).toEqual({ cta_label: 'Join', cta_url: 'https://example.org/' });

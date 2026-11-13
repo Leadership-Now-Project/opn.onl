@@ -116,11 +116,33 @@ fn is_vimeo_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Words Vimeo puts after a video's or a member's number that have the shape
+/// of an unlisted video's hash and are pages, not videos
+/// (`vimeo.com/<id>/settings`). Twin: `VIMEO_NOT_HASHES` in
+/// `frontend/src/utils/media.ts`.
+const VIMEO_NOT_HASHES: [&str; 14] = [
+    "settings",
+    "likes",
+    "collections",
+    "videos",
+    "following",
+    "followers",
+    "channels",
+    "groups",
+    "albums",
+    "portfolios",
+    "appearances",
+    "members",
+    "comments",
+    "review",
+];
+
 fn is_vimeo_hash(hash: &str) -> bool {
     (VIMEO_HASH_MIN_LEN..=VIMEO_HASH_MAX_LEN).contains(&hash.len())
         && hash
             .bytes()
             .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
+        && !VIMEO_NOT_HASHES.contains(&hash)
 }
 
 fn is_drive_file_id(id: &str) -> bool {
@@ -392,18 +414,37 @@ pub fn cta_text(
     if label.chars().any(char::is_control) {
         return Err("The button's label contains control characters".to_string());
     }
-    // `https` and nothing else: no `javascript:`, no `data:`, no plain http.
-    // Read with the URL parser, never by looking at how the text starts.
-    let https = url::Url::parse(url).is_ok_and(|parsed| {
-        parsed.scheme() == "https"
-            && parsed.host_str().is_some()
-            && parsed.username().is_empty()
-            && parsed.password().is_none()
-    });
-    if !https || url.len() > MAX_URL_LEN {
+    let Some(url) = cta_href(url) else {
         return Err("The button's link must be an https:// address".to_string());
+    };
+    Ok(Some((label.to_string(), url)))
+}
+
+/// The address a button's link is stored and shown as: the URL parser's own
+/// spelling of it, never the text that was typed. `None` unless it is `https`
+/// with a host and no name or password: no `javascript:`, no `data:`, no
+/// plain http.
+///
+/// The parser reads `https:example.org` and `https:/example.org` as
+/// `https://example.org/`, and that host is the one every check is run on. A
+/// browser given the typed text inside a page would resolve it against the
+/// page instead and open our own site. So what is kept is what was checked.
+/// The page call runs a stored link through here again on the way out, for a
+/// row written before this rule.
+///
+/// Twin: `httpsHref` in `frontend/src/utils/media.ts`.
+pub fn cta_href(url: &str) -> Option<String> {
+    // The parser drops tabs and line breaks; an address with one is refused.
+    if url.len() > MAX_URL_LEN || url.chars().any(char::is_control) {
+        return None;
     }
-    Ok(Some((label.to_string(), url.to_string())))
+    let parsed = url::Url::parse(url).ok()?;
+    let https = parsed.scheme() == "https"
+        && parsed.host_str().is_some_and(|host| !host.is_empty())
+        && parsed.username().is_empty()
+        && parsed.password().is_none();
+    let href = parsed.to_string();
+    (https && href.len() <= MAX_URL_LEN).then_some(href)
 }
 
 // ------------------------------------------------------------------ lookups
@@ -858,6 +899,13 @@ mod tests {
             "https://vimeo.com/７６９７９８７１",
             "https://vimeo.com/76979871/ABC123DEF0",
             "https://vimeo.com/76979871/abc",
+            // Pages under a video's number, not an unlisted video's hash.
+            "https://vimeo.com/76979871/settings",
+            "https://vimeo.com/76979871/collections",
+            "https://vimeo.com/76979871/videos",
+            "https://vimeo.com/76979871/likes",
+            "https://vimeo.com/76979871?h=settings",
+            "https://player.vimeo.com/video/76979871?h=settings",
             "https://vimeo.com/76979871?h=abc%22onload",
             "https://vimeo.com/76979871?h=abc123def0&h=ffffffffff",
             // Control characters.
@@ -945,6 +993,7 @@ mod tests {
             ("vimeo", "76979871/../x"),
             ("vimeo", "76979871:"),
             ("vimeo", "76979871:AB\"><"),
+            ("vimeo", "76979871:settings"),
             ("vimeo", "evil.test"),
             ("drive", "abc/../../x"),
             ("drive", "abc?x=1"),
@@ -1005,13 +1054,54 @@ mod tests {
             "example.org",
             "https://",
             "https://user:pw@example.org/",
+            "https://user@example.org/",
             "mailto:someone@example.org",
+            // The parser would drop the tab and the line break.
+            "https://exa\tmple.org/",
+            "https://example.org/a\nb",
         ] {
             assert!(
                 cta_text(Some("Go"), Some(url)).is_err(),
                 "{url:?} must be refused"
             );
         }
+    }
+
+    /// `https:host` and `https:/host` parse as `https://host/`, and the checks
+    /// run on that host. A browser handed the typed text inside a page reads
+    /// it as a path on the page's own site, so the typed text is never kept.
+    #[test]
+    fn the_buttons_link_is_kept_in_the_parsers_spelling_never_as_typed() {
+        for (typed, kept) in [
+            ("https:example.org", "https://example.org/"),
+            ("https:/example.org/join", "https://example.org/join"),
+            ("https:\\\\example.org\\join", "https://example.org/join"),
+            (
+                "HTTPS://Example.ORG/Join?a=1#b",
+                "https://example.org/Join?a=1#b",
+            ),
+            ("https://example.org", "https://example.org/"),
+            ("https://example.org:443/x", "https://example.org/x"),
+            ("https://example.org/join", "https://example.org/join"),
+        ] {
+            assert_eq!(cta_href(typed).as_deref(), Some(kept), "{typed}");
+            assert_eq!(
+                cta_text(Some("Go"), Some(typed)),
+                Ok(Some(("Go".to_string(), kept.to_string()))),
+                "{typed}"
+            );
+            assert!(
+                kept.starts_with("https://"),
+                "an absolute address wherever it is used: {kept}"
+            );
+            // Its own spelling reads back as itself.
+            assert_eq!(cta_href(kept).as_deref(), Some(kept));
+        }
+        for refused in ["https:", "https:/", "https:///", "http:example.org", ""] {
+            assert_eq!(cta_href(refused), None, "{refused:?}");
+        }
+        let long = format!("https://example.org/{}", "a".repeat(2100));
+        assert_eq!(cta_href(&long), None);
     }
 
     #[test]
@@ -1151,6 +1241,33 @@ mod tests {
         )
         .unwrap();
         assert!(!valid(&foreign, &open));
+
+        // A token with every claim of a ticket for this link, same secret,
+        // but issued for something else (a password unlock, a session): the
+        // purpose is the only thing that tells them apart.
+        let exp = usize::try_from(Utc::now().timestamp() + MEDIA_TICKET_TTL_SECONDS).unwrap();
+        let claims_for = |purpose: &str| MediaClaims {
+            sub: purpose.to_string(),
+            exp,
+            link_id: open.id,
+            code: open.code.clone(),
+            password_fingerprint: link_fingerprint(&open),
+        };
+        let signed = |claims: &MediaClaims| {
+            encode(
+                &Header::new(Algorithm::HS256),
+                claims,
+                &EncodingKey::from_secret(SECRET.as_bytes()),
+            )
+            .unwrap()
+        };
+        assert!(valid(&signed(&claims_for(TICKET_PURPOSE)), &open));
+        for purpose in ["link_unlock", "view_ticket", "", "media_ticket "] {
+            assert!(
+                !valid(&signed(&claims_for(purpose)), &open),
+                "a token issued as {purpose:?} is not a media ticket"
+            );
+        }
     }
 
     #[test]

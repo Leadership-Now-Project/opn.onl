@@ -108,6 +108,10 @@ describe('MediaPage', () => {
         'javascript:alert(1)',
         'data:text/html,<script>alert(1)</script>',
         '//player.vimeo.com/video/1',
+        // Parsed, these are Vimeo's player; framed as written they are a
+        // path on this site.
+        'https:player.vimeo.com/video/1',
+        'https:/player.vimeo.com/video/1',
         '',
         null,
         { toString: 'https://player.vimeo.com/video/1' },
@@ -117,6 +121,14 @@ describe('MediaPage', () => {
 
         expect(await screen.findByText('This video cannot be shown.')).toBeVisible();
         expect(player()).not.toBeInTheDocument();
+    });
+
+    it('frames the address as the URL parser reads it, not the text it was given', async () => {
+        mockApi(answer(200, { ...MEDIA, embed: { src: 'https://player.vimeo.com\\video\\76979871' } }));
+        arrive();
+
+        await waitFor(() => expect(player()).toBeInTheDocument());
+        expect(player()!.getAttribute('src')).toBe('https://player.vimeo.com/video/76979871');
     });
 
     it('frames nothing when the answer has no player at all', async () => {
@@ -143,6 +155,18 @@ describe('MediaPage', () => {
         expect(button).toHaveAttribute('href', 'https://example.org/join');
         expect(button).toHaveAttribute('target', '_blank');
         expect(button).toHaveAttribute('rel', 'noopener noreferrer');
+    });
+
+    it.each([
+        ['https:example.org/join', 'https://example.org/join'],
+        ['https:/example.org', 'https://example.org/'],
+        [' https://example.org/join ', 'https://example.org/join'],
+    ])('points the button for the link %j at %s, never at a path on this site', async (url, href) => {
+        mockApi(answer(200, { ...MEDIA, cta: { label: 'Join us', url } }));
+        arrive();
+
+        const button = await screen.findByRole('link', { name: 'Join us' });
+        expect(button.getAttribute('href')).toBe(href);
     });
 
     it.each([

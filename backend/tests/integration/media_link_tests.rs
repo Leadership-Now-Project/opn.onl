@@ -25,7 +25,8 @@ use axum_test::{TestResponse, TestServer};
 use common::{spawn_real_app_with_embed_check, unique_code, unique_email};
 use futures::future::BoxFuture;
 use opn_onl_backend::entity::{
-    link_drive_files, link_media, links, org_members, organizations, users,
+    blocked_domains, blocked_links, link_drive_files, link_media, links, org_members,
+    organizations, users,
 };
 use opn_onl_backend::handlers::links::NOT_A_VIDEO_ADDRESS;
 use opn_onl_backend::utils::ClickBuffer;
@@ -812,6 +813,15 @@ async fn without_a_valid_ticket_every_refusal_is_the_same_401() {
         ),
     ] {
         let res = open(&world, at, ticket).await;
+        // A refusal is never kept by a cache: the same call with a fresh
+        // ticket is the page.
+        assert_eq!(
+            res.maybe_header(CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok().map(str::to_string))
+                .as_deref(),
+            Some("no-store"),
+            "{what}"
+        );
         answers.push((what.to_string(), res.status_code().as_u16(), res.text()));
     }
     for (what, status, body) in &answers {
@@ -1043,6 +1053,45 @@ async fn the_button_needs_both_a_label_and_an_https_link() {
     assert_eq!(page.status_code(), 200);
     assert_eq!(page.json::<Value>()["cta"], Value::Null);
     assert!(!page.text().contains("javascript"), "{}", page.text());
+
+    // A link typed without its two slashes is kept, and goes out, as the
+    // address that was checked: `https:iana.org/x` inside a page would be a
+    // path on our own site.
+    let res = put(json!({"media_cta": {"label": "Go", "url": "https:/iana.org/give"}})).await;
+    assert_eq!(res.status_code(), 200, "{}", res.text());
+    assert_eq!(
+        res.json::<Value>()["media"]["cta_url"],
+        "https://iana.org/give"
+    );
+    assert_eq!(
+        media_rows(&world.db, id).await[0].cta_url.as_deref(),
+        Some("https://iana.org/give")
+    );
+    let typed = media_link(
+        &world,
+        &owner,
+        json!({"media": {"cta_label": "Go", "cta_url": "https:iana.org/join"}}),
+    )
+    .await;
+    assert_eq!(typed["media"]["cta_url"], "https://iana.org/join");
+    assert_eq!(
+        media_rows(&world.db, id_of(&typed)).await[0]
+            .cta_url
+            .as_deref(),
+        Some("https://iana.org/join")
+    );
+    // A row from before that rule still cannot put a relative link on the page.
+    for (stored, shown) in [
+        ("https:iana.org/old", "https://iana.org/old"),
+        ("https:/iana.org", "https://iana.org/"),
+    ] {
+        let mut row: link_media::ActiveModel = media_rows(&world.db, id).await.remove(0).into();
+        row.cta_label = Set(Some("Click".to_string()));
+        row.cta_url = Set(Some(stored.to_string()));
+        row.update(&world.db).await.unwrap();
+        let page: Value = open(&world, &code, &ticket).await.json();
+        assert_eq!(page["cta"], json!({"label": "Click", "url": shown}));
+    }
 
     // An ordinary link has no button to set.
     let plain = create(
@@ -1313,4 +1362,285 @@ async fn a_link_made_without_media_is_what_it_always_was() {
         .json(&json!({"rules": [{"match_device": "mobile", "destination_url": "https://iana.org/m"}]}))
         .await;
     assert_eq!(res.status_code(), 200, "{}", res.text());
+}
+
+// ------------------------------------------- the button's link is a destination
+
+/// Whether this machine's resolver answers `127.0.0.1.nip.io` with loopback
+/// (see `qa_v1_regression.rs`): when it does not, the private-address check
+/// lets a write through by design and its assertions are skipped.
+async fn rebinding_dns_available() -> bool {
+    let lookup = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::lookup_host(("127.0.0.1.nip.io", 443)),
+    )
+    .await;
+    match lookup {
+        Ok(Ok(mut addrs)) => addrs.any(|a| a.ip().is_loopback()),
+        _ => {
+            eprintln!(
+                "127.0.0.1.nip.io does not resolve here; skipping the private-address assertions"
+            );
+            false
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_buttons_link_passes_the_blocklist_and_the_private_address_check() {
+    let world = world().await;
+    let owner = person(&world.db).await;
+    let host = format!("blocked-{}.iana.org", unique_code().to_lowercase());
+    blocked_domains::ActiveModel {
+        domain: Set(host.clone()),
+        reason: Set(Some("media button test".to_string())),
+        ..Default::default()
+    }
+    .insert(&world.db)
+    .await
+    .expect("block the domain");
+    let blocked = format!("https://{host}/join");
+
+    // A media link that already has a good button.
+    let link = media_link(
+        &world,
+        &owner,
+        json!({"media": {"cta_label": "Join", "cta_url": "https://iana.org/join"}}),
+    )
+    .await;
+    let id = id_of(&link);
+    let before = links_of(&world.db, &owner).await;
+    let put = |url: String| {
+        world
+            .app
+            .put(&format!("/links/{id}"))
+            .authorization_bearer(&owner.token)
+            .json(&json!({"media_cta": {"label": "Go", "url": url}}))
+    };
+
+    // Blocked: no new link with it, and no existing button changed to it.
+    let res = create(
+        &world.app,
+        &owner,
+        json!({
+            "original_url": watch_url(&video_id()),
+            "media": {"cta_label": "Go", "cta_url": blocked},
+        }),
+    )
+    .await;
+    assert_eq!(res.status_code(), 403, "{}", res.text());
+    assert!(res.text().contains("blocked"), "{}", res.text());
+    let res = put(blocked.clone()).await;
+    assert_eq!(res.status_code(), 403, "{}", res.text());
+    // Written without its slashes it is the same host, and as blocked.
+    let res = put(format!("https:{host}/join")).await;
+    assert_eq!(res.status_code(), 403, "{}", res.text());
+
+    // A name that resolves to this machine: refused like a link's destination.
+    if rebinding_dns_available().await {
+        let private = "https://127.0.0.1.nip.io/admin";
+        let res = create(
+            &world.app,
+            &owner,
+            json!({
+                "original_url": watch_url(&video_id()),
+                "media": {"cta_label": "Go", "cta_url": private},
+            }),
+        )
+        .await;
+        assert_eq!(res.status_code(), 400, "{}", res.text());
+        assert!(
+            res.text().contains("disallowed") || res.text().contains("private"),
+            "{}",
+            res.text()
+        );
+        let res = put(private.to_string()).await;
+        assert_eq!(res.status_code(), 400, "{}", res.text());
+    }
+
+    assert_eq!(
+        links_of(&world.db, &owner).await,
+        before,
+        "no link was made"
+    );
+    assert_eq!(
+        media_rows(&world.db, id).await[0].cta_url.as_deref(),
+        Some("https://iana.org/join"),
+        "the button is what it was"
+    );
+}
+
+#[tokio::test]
+async fn a_video_blocked_after_its_ticket_was_issued_is_no_longer_shown() {
+    let world = world().await;
+    let owner = person(&world.db).await;
+    let link = media_link(&world, &owner, json!({})).await;
+    let code = code_of(&link);
+    let ticket = ticket_in(&visit(&world, &code).await, &code);
+    assert_eq!(open(&world, &code, &ticket).await.status_code(), 200);
+
+    // This one video is blocked while a page with it is open.
+    let blocked = blocked_links::ActiveModel {
+        url: Set(link["original_url"].as_str().unwrap().to_string()),
+        reason: Set(Some("blocked after the link was made".to_string())),
+        created_at: Set(chrono::Utc::now().naive_utc()),
+        ..Default::default()
+    }
+    .insert(&world.db)
+    .await
+    .expect("block the video's address");
+
+    let res = open(&world, &code, &ticket).await;
+    assert_eq!(res.status_code(), 410, "{}", res.text());
+    assert!(res.json::<Value>().get("embed").is_none(), "{}", res.text());
+    assert!(!res.text().contains("youtube"), "{}", res.text());
+    assert_eq!(
+        res.header(CACHE_CONTROL).to_str().unwrap(),
+        "no-store",
+        "a refusal is not kept either"
+    );
+
+    // Unblocked, the same ticket shows the video again.
+    blocked_links::Entity::delete_by_id(blocked.id)
+        .exec(&world.db)
+        .await
+        .unwrap();
+    assert_eq!(open(&world, &code, &ticket).await.status_code(), 200);
+}
+
+// --------------------------------------------- a Drive video, cloned and restored
+
+async fn drive_rows(db: &DatabaseConnection, link_id: i32) -> Vec<link_drive_files::Model> {
+    link_drive_files::Entity::find()
+        .filter(link_drive_files::Column::LinkId.eq(link_id))
+        .all(db)
+        .await
+        .unwrap()
+}
+
+/// What `GET /links` and `GET /links/{id}` say about one link.
+async fn listed_and_fetched(world: &World, who: &Person, id: i32) -> [Value; 2] {
+    let items: Vec<Value> = world
+        .app
+        .get("/links")
+        .authorization_bearer(&who.token)
+        .await
+        .json();
+    let listed = items
+        .into_iter()
+        .find(|item| item["id"] == id)
+        .expect("the link is in its owner's list");
+    let fetched: Value = world
+        .app
+        .get(&format!("/links/{id}"))
+        .authorization_bearer(&who.token)
+        .await
+        .json();
+    [listed, fetched]
+}
+
+#[tokio::test]
+async fn a_cloned_or_restored_drive_video_is_still_known_as_a_media_link() {
+    let world = world().await;
+    let owner = person(&world.db).await;
+    let file_id = format!("1{}_-y", unique_code());
+    let url = format!("https://drive.google.com/file/d/{file_id}/view?usp=drivesdk");
+    let res = create(
+        &world.app,
+        &owner,
+        json!({
+            "original_url": url,
+            "drive_file": drive_video(&file_id, "video/mp4"),
+            "media": {"provider": "drive", "cta_label": "Join", "cta_url": "https://iana.org/join"},
+        }),
+    )
+    .await;
+    assert_eq!(res.status_code(), 201, "{}", res.text());
+    let link: Value = res.json();
+    let (id, code) = (id_of(&link), code_of(&link));
+
+    // A clone is the whole link: a media link and a Drive link.
+    let res = world
+        .app
+        .post(&format!("/links/{id}/clone"))
+        .authorization_bearer(&owner.token)
+        .await;
+    assert_eq!(res.status_code(), 201, "{}", res.text());
+    let clone: Value = res.json();
+    let (clone_id, clone_code) = (id_of(&clone), code_of(&clone));
+    assert_eq!(media_rows(&world.db, clone_id).await.len(), 1);
+    let copied = drive_rows(&world.db, clone_id).await;
+    assert_eq!(copied.len(), 1, "the clone has a Drive row of its own");
+    assert_eq!(copied[0].file_id, file_id);
+    assert_eq!(copied[0].name, "Town hall.mp4");
+    assert_eq!(copied[0].mime_type, "video/mp4");
+    assert_eq!(copied[0].created_by, Some(owner.id));
+    assert_eq!(
+        drive_rows(&world.db, id).await.len(),
+        1,
+        "the original keeps its own"
+    );
+    for shown in listed_and_fetched(&world, &owner, clone_id).await {
+        assert_eq!(shown["media"]["provider"], "drive", "{shown}");
+        assert_eq!(shown["media"]["cta_url"], "https://iana.org/join");
+        assert_eq!(shown["drive"]["name"], "Town hall.mp4", "{shown}");
+    }
+    let ticket = ticket_in(&visit(&world, &clone_code).await, &clone_code);
+    let page: Value = open(&world, &clone_code, &ticket).await.json();
+    assert_eq!(
+        page["embed"]["src"],
+        format!("https://drive.google.com/file/d/{file_id}/preview")
+    );
+
+    // A media link whose Drive row is gone (a clone made before clones
+    // copied it) is a media link all the same: its own row says so.
+    link_drive_files::Entity::delete_many()
+        .filter(link_drive_files::Column::LinkId.eq(clone_id))
+        .exec(&world.db)
+        .await
+        .unwrap();
+    for shown in listed_and_fetched(&world, &owner, clone_id).await {
+        assert_eq!(shown["media"]["provider"], "drive", "{shown}");
+        assert!(shown["drive"].is_null(), "{shown}");
+    }
+
+    // Deleted, then restored by an administrator. Deleting forgets the Drive
+    // file (nothing is kept about it) and keeps the media row, so what comes
+    // back is a media link without its Drive name: shown as media everywhere,
+    // and its page plays.
+    let res = world
+        .app
+        .delete(&format!("/links/{id}"))
+        .authorization_bearer(&owner.token)
+        .await;
+    assert!(res.status_code().is_success(), "{}", res.text());
+    assert!(drive_rows(&world.db, id).await.is_empty());
+    assert_eq!(media_rows(&world.db, id).await.len(), 1);
+    let admin = person(&world.db).await;
+    let mut row: users::ActiveModel = users::Entity::find_by_id(admin.id)
+        .one(&world.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into();
+    row.is_admin = Set(true);
+    row.update(&world.db).await.unwrap();
+    let res = world
+        .app
+        .post(&format!("/admin/links/{id}/restore"))
+        .authorization_bearer(&admin.token)
+        .await;
+    assert_eq!(res.status_code(), 200, "{}", res.text());
+
+    for shown in listed_and_fetched(&world, &owner, id).await {
+        assert_eq!(shown["media"]["provider"], "drive", "{shown}");
+        assert_eq!(shown["media"]["cta_label"], "Join");
+        assert!(shown["drive"].is_null(), "{shown}");
+    }
+    let ticket = ticket_in(&visit(&world, &code).await, &code);
+    let page: Value = open(&world, &code, &ticket).await.json();
+    assert_eq!(
+        page["embed"]["src"],
+        format!("https://drive.google.com/file/d/{file_id}/preview")
+    );
 }

@@ -31,6 +31,15 @@ const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
 const YOUTUBE_NOT_IDS = ['videoseries', 'live_stream'];
 const VIMEO_ID = /^[1-9][0-9]{0,11}$/;
 const VIMEO_HASH = /^[0-9a-z]{6,32}$/;
+/**
+ * Words Vimeo puts after a video's or a member's number that have the shape
+ * of an unlisted video's hash and are pages, not videos. Twin of
+ * `VIMEO_NOT_HASHES` in `backend/src/utils/media.rs`.
+ */
+const VIMEO_NOT_HASHES = [
+    'settings', 'likes', 'collections', 'videos', 'following', 'followers', 'channels',
+    'groups', 'albums', 'portfolios', 'appearances', 'members', 'comments', 'review',
+];
 
 /** The one value of a query parameter; `undefined` when it is given twice. */
 function oneParam(url: URL, name: string): string | null | undefined {
@@ -47,7 +56,9 @@ function youtube(id: string | null | undefined): ParsedMedia | null {
 function vimeo(id: string, hash: string | null | undefined): ParsedMedia | null {
     if (hash === undefined || !VIMEO_ID.test(id)) return null;
     if (hash === null) return { provider: 'vimeo', mediaId: id };
-    return VIMEO_HASH.test(hash) ? { provider: 'vimeo', mediaId: `${id}:${hash}` } : null;
+    return VIMEO_HASH.test(hash) && !VIMEO_NOT_HASHES.includes(hash)
+        ? { provider: 'vimeo', mediaId: `${id}:${hash}` }
+        : null;
 }
 
 /**
@@ -115,34 +126,64 @@ export const MEDIA_EMBED_ORIGINS = [
 ] as const;
 
 /**
- * Whether the page may frame `src`: an `https` address on exactly one of the
- * three embed hosts. The server builds the address; this is the page's own
- * check, so that no answer, however it was produced, frames another site.
+ * The address the page frames for `src`, or `null` when it may frame nothing:
+ * an `https://` address on exactly one of the three embed hosts, in the URL
+ * parser's own spelling. The server builds the address; this is the page's
+ * own check, so that no answer, however it was produced, frames another site.
+ *
+ * Both halves matter. `https:player.vimeo.com/video/1` parses as Vimeo's
+ * player, but as a frame's `src` a browser resolves it against this page and
+ * frames our own site. So the text must be written `https://`, and what is
+ * framed is the parsed address, never the text.
  */
-export function isAllowedEmbedSrc(src: unknown): src is string {
-    if (typeof src !== 'string' || /\p{Cc}/u.test(src)) return false;
+export function embedHref(src: unknown): string | null {
+    if (typeof src !== 'string' || /\p{Cc}/u.test(src) || !src.startsWith('https://')) return null;
     let url: URL;
     try {
         url = new URL(src);
     } catch {
-        return false;
+        return null;
     }
     return url.protocol === 'https:'
         && url.port === ''
         && url.username === ''
         && url.password === ''
-        && (MEDIA_EMBED_ORIGINS as readonly string[]).includes(url.origin);
+        && (MEDIA_EMBED_ORIGINS as readonly string[]).includes(url.origin)
+        ? url.href
+        : null;
 }
 
-/** Whether `url` is an `https` address a button may point at. Never `javascript:`. */
-export function isHttpsUrl(url: unknown): url is string {
-    if (typeof url !== 'string' || /\p{Cc}/u.test(url)) return false;
+/** Whether the page may frame `src`. What it frames is `embedHref(src)`. */
+export function isAllowedEmbedSrc(src: unknown): src is string {
+    return embedHref(src) !== null;
+}
+
+/**
+ * The address a button points at for `url`, or `null` when it may not be a
+ * button's link: `https` with a host and no name or password, in the URL
+ * parser's own spelling. Never `javascript:`. Twin of `cta_href` in
+ * `backend/src/utils/media.rs`, which stores a link in the same spelling.
+ *
+ * `https:example.org` and `https:/example.org` parse as `https://example.org/`
+ * but, as typed, an anchor resolves them against the page it is on. So an
+ * anchor is given this address, never the text.
+ */
+export function httpsHref(url: unknown): string | null {
+    if (typeof url !== 'string' || /\p{Cc}/u.test(url)) return null;
     try {
         const parsed = new URL(url.trim());
-        return parsed.protocol === 'https:' && parsed.hostname !== '' && !parsed.username && !parsed.password;
+        return parsed.protocol === 'https:' && parsed.hostname !== '' && !parsed.username && !parsed.password
+            && parsed.href.length <= MAX_URL_LENGTH
+            ? parsed.href
+            : null;
     } catch {
-        return false;
+        return null;
     }
+}
+
+/** Whether `url` is an `https` address a button may point at. */
+export function isHttpsUrl(url: unknown): url is string {
+    return httpsHref(url) !== null;
 }
 
 /** The longest label of the button under the player. Twin of `MAX_CTA_LABEL_CHARS`. */

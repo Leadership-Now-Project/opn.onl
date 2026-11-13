@@ -1563,28 +1563,20 @@ pub(crate) async fn attach_file_info<'a, C: ConnectionTrait>(
         if link.is_file() {
             file_link_ids.push(link.id);
         } else if crate::utils::drive::is_drive_url(&link.original_url) {
-            // Only a link that points into Drive can have a row.
+            // Only a link that points into Drive can have a Drive row, and
+            // it can be a media link as well (a video in Drive). Whether it
+            // is one is read from its own `link_media` row, never from the
+            // Drive row: a media link whose Drive row is gone (forgotten
+            // when the link was deleted, then restored) is still a media
+            // link, and must not be offered a destination or routing rules.
             drive_link_ids.push(link.id);
+            media_link_ids.push(link.id);
         } else if crate::utils::media::parse_media_url(&link.original_url).is_some() {
-            // Only a link to a YouTube or Vimeo video can be a media link
-            // (or one to a video in Drive, found below).
+            // Only a link to a YouTube or Vimeo video can be a media link.
             media_link_ids.push(link.id);
         }
     }
     attach_drive_info(db, &drive_link_ids, responses).await?;
-    // A Drive media link is a Drive link whose file is a video, so only
-    // those are looked up: a page of documents runs no media query.
-    media_link_ids.extend(
-        responses
-            .iter()
-            .filter(|response| {
-                response
-                    .drive
-                    .as_ref()
-                    .is_some_and(|drive| crate::utils::media::is_video_mime(&drive.mime_type))
-            })
-            .map(|response| response.id),
-    );
     attach_media_info(db, &media_link_ids, responses).await?;
     if file_link_ids.is_empty() {
         return Ok(());
@@ -4285,12 +4277,14 @@ pub async fn redirect_link(
             None => None,
             Some(_) => match crate::utils::media::create_media_ticket(&link) {
                 Some(ticket) => Some(ticket),
+                // Answered the way every link that will not open is: a page
+                // for a browser, the plain reason for anything else.
                 None => {
-                    return (
+                    return dead_link(
+                        &headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Unable to open the media page",
-                    )
-                        .into_response();
+                        "This video cannot be opened right now",
+                    );
                 }
             },
         };
@@ -7769,6 +7763,47 @@ pub async fn clone_link(
     match crate::utils::media::media_of_link(&txn, &link).await {
         Ok(None) => {}
         Ok(Some(media)) => {
+            // A Drive video is a Drive link too: the clone gets the row that
+            // says which file it is for, so it is the whole link and not a
+            // media page the Drive side knows nothing about. Whoever cloned
+            // it is who made this one.
+            if media.provider == crate::utils::media::Provider::Drive.as_str() {
+                let drive_row = match link_drive_files::Entity::find()
+                    .filter(link_drive_files::Column::LinkId.eq(link.id))
+                    .one(&txn)
+                    .await
+                {
+                    Ok(row) => row,
+                    Err(_) => {
+                        let _ = txn.rollback().await;
+                        return json_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Failed to clone link",
+                        );
+                    }
+                };
+                if let Some(drive_row) = drive_row {
+                    let copy = link_drive_files::ActiveModel {
+                        link_id: Set(new_id),
+                        file_id: Set(drive_row.file_id),
+                        name: Set(drive_row.name),
+                        mime_type: Set(drive_row.mime_type),
+                        created_by: Set(Some(user_id)),
+                        ..Default::default()
+                    };
+                    if link_drive_files::Entity::insert(copy)
+                        .exec(&txn)
+                        .await
+                        .is_err()
+                    {
+                        let _ = txn.rollback().await;
+                        return json_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Failed to clone link",
+                        );
+                    }
+                }
+            }
             let copy = link_media::ActiveModel {
                 link_id: Set(new_id),
                 provider: Set(media.provider),

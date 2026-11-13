@@ -4,7 +4,7 @@ import { CirclePlay, ExternalLink, Loader2 } from 'lucide-react';
 import { API_ENDPOINTS, shortLinkBase } from '../config/api';
 import SEO from '../components/SEO';
 import logger from '../utils/logger';
-import { isAllowedEmbedSrc, isHttpsUrl, providerName } from '../utils/media';
+import { embedHref, httpsHref, providerName } from '../utils/media';
 
 /** What `POST /{code}/media` answers. */
 interface Media {
@@ -91,9 +91,10 @@ export default function MediaPage() {
                 } else {
                     const media = await response.json() as Media;
                     if (ignore) return;
-                    const src = media?.embed?.src;
-                    // Whatever answered, only one of the three players is framed.
-                    setStage(isAllowedEmbedSrc(src)
+                    // Whatever answered, only one of the three players is
+                    // framed, at the address as the URL parser reads it.
+                    const src = embedHref(media?.embed?.src);
+                    setStage(src
                         ? { name: 'ready', media, src }
                         : { name: 'failed', message: CANNOT_SHOW });
                 }
@@ -112,9 +113,12 @@ export default function MediaPage() {
         const { media, src } = stage;
         const title = typeof media.title === 'string' ? media.title.trim() : '';
         const provider = providerName(media.provider);
-        const cta = media.cta && typeof media.cta.label === 'string' && media.cta.label.trim() && isHttpsUrl(media.cta.url)
-            ? { label: media.cta.label.trim(), url: media.cta.url.trim() }
+        // The parsed, absolute address: a link stored as `https:host` would
+        // otherwise open a path on this site.
+        const ctaUrl = media.cta && typeof media.cta.label === 'string' && media.cta.label.trim()
+            ? httpsHref(media.cta.url)
             : null;
+        const cta = media.cta && ctaUrl ? { label: media.cta.label.trim(), url: ctaUrl } : null;
         return (
             <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:py-10">
                 <SEO title={title || 'Video'} description="A shared video." noIndex />

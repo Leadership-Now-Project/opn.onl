@@ -174,7 +174,9 @@ pub async fn open_media(
     };
     // Checked again on the way out, as the player's address is: a row that
     // was not written through `POST /links` still cannot put a link on the
-    // page that is anything but `https`.
+    // page that is anything but `https`, and the link goes out in the URL
+    // parser's spelling (`cta_href`), so an older row holding `https:host`
+    // cannot become a path on our own site.
     let cta = cta_text(media.cta_label.as_deref(), media.cta_url.as_deref())
         .ok()
         .flatten()
