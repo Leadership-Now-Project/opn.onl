@@ -4,6 +4,16 @@ import Login from './Login';
 import { mockFetchResponse, mockFetchError, mockToken } from '../test/test-utils';
 import { blockSiteStorage } from '../test/helpers';
 
+// The page offers nothing to sign in with until /auth/settings has settled.
+// Render it and wait for that, as a visitor would.
+const renderLogin = async (options?: Parameters<typeof render>[1]) => {
+  const result = render(<Login />, options);
+  await waitFor(() => {
+    expect(screen.queryByRole('status', { name: /loading sign-in options/i })).not.toBeInTheDocument();
+  });
+  return result;
+};
+
 describe('Login Page', () => {
   beforeEach(() => {
     vi.mocked(global.fetch).mockReset();
@@ -22,26 +32,65 @@ describe('Login Page', () => {
     });
   });
 
-  it('renders login form', () => {
-    render(<Login />);
+  it('renders login form', async () => {
+    await renderLogin();
     expect(screen.getByText('Welcome back')).toBeInTheDocument();
     expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
   });
 
-  it('posts the form so a native submit cannot leak credentials into the URL', () => {
-    render(<Login />);
+  describe('before the settings have answered', () => {
+    // A request that never settles: the page stays as it first rendered.
+    const pending = () => vi.mocked(global.fetch).mockImplementation((() => new Promise(() => {})) as any);
+
+    it('shows neither the password form nor any other way to sign in', async () => {
+      Object.defineProperty(window, 'PublicKeyCredential', {
+        configurable: true,
+        value: class PublicKeyCredentialMock {},
+      });
+      pending();
+      render(<Login />);
+
+      expect(screen.getByRole('status', { name: /loading sign-in options/i })).toBeInTheDocument();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/email address/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /forgot/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /create an account/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /sign in with passkey/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /sign in with google/i })).not.toBeInTheDocument();
+    });
+
+    it('falls back to the password form when the settings cannot be read', async () => {
+      vi.mocked(global.fetch).mockRejectedValue(new Error('offline'));
+      render(<Login />);
+
+      expect(await screen.findByLabelText(/password/i)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /create an account/i })).toBeInTheDocument();
+      expect(screen.queryByRole('status', { name: /loading sign-in options/i })).not.toBeInTheDocument();
+    });
+
+    it('falls back to the password form when the settings answer with an error', async () => {
+      vi.mocked(global.fetch).mockImplementation((() => mockFetchError('nope', 500)) as any);
+      render(<Login />);
+
+      expect(await screen.findByLabelText(/password/i)).toBeInTheDocument();
+    });
+  });
+
+  it('posts the form so a native submit cannot leak credentials into the URL', async () => {
+    await renderLogin();
     expect(screen.getByLabelText(/email address/i).closest('form')).toHaveAttribute('method', 'post');
   });
 
-  it('shows link to register page', () => {
-    render(<Login />);
+  it('shows link to register page', async () => {
+    await renderLogin();
     expect(screen.getByRole('link', { name: /create an account/i })).toBeInTheDocument();
   });
 
   it('validates email input', async () => {
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     
     const emailInput = screen.getByLabelText(/email address/i);
     await user.type(emailInput, 'invalid-email');
@@ -54,7 +103,7 @@ describe('Login Page', () => {
       mockFetchResponse({ token: mockToken }) as any
     );
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');
@@ -76,7 +125,7 @@ describe('Login Page', () => {
       mockFetchResponse({ token: mockToken }) as any
     );
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');
@@ -127,7 +176,7 @@ describe('Login Page', () => {
     it('is not offered, and nothing is loaded from Google, when the instance has no client id', async () => {
       delete window.google;
       serve({ passkeys_enabled: true });
-      render(<Login />);
+      await renderLogin();
 
       await waitFor(() => {
         expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/auth/settings'));
@@ -144,7 +193,7 @@ describe('Login Page', () => {
         value: class PublicKeyCredentialMock {},
       });
       serve({ passkeys_enabled: true, google_client_id: CLIENT_ID });
-      render(<Login />);
+      await renderLogin();
 
       expect(await screen.findByRole('button', { name: /sign in with google/i })).toBeInTheDocument();
       expect(screen.queryByLabelText(/email address/i)).not.toBeInTheDocument();
@@ -159,7 +208,7 @@ describe('Login Page', () => {
       delete window.google;
       serve({ google_client_id: CLIENT_ID });
       expect(gsiScripts()).toHaveLength(0);
-      render(<Login />);
+      await renderLogin();
 
       await screen.findByRole('button', { name: /sign in with google/i });
       await waitFor(() => expect(gsiScripts()).toHaveLength(1));
@@ -167,7 +216,7 @@ describe('Login Page', () => {
 
     it('signs nobody in on page load, with or without a client id', async () => {
       serve({ google_client_id: CLIENT_ID }, () => mockFetchResponse({ token: mockToken, is_admin: true }));
-      render(<Login />);
+      await renderLogin();
 
       await screen.findByRole('button', { name: /sign in with google/i });
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -180,7 +229,7 @@ describe('Login Page', () => {
     it('posts the code from the popup, stores the session and opens the dashboard', async () => {
       serve({ google_client_id: CLIENT_ID }, () =>
         mockFetchResponse({ token: mockToken, email_verified: true, is_admin: true }));
-      const { user } = render(<Login />, { route: '/login' });
+      const { user } = await renderLogin({ route: '/login' });
 
       await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
 
@@ -208,7 +257,7 @@ describe('Login Page', () => {
     it('tells a refused account to use its Leadership Now Project account', async () => {
       serve({ google_client_id: CLIENT_ID }, () =>
         mockFetchError('This Google account is not allowed', 403));
-      const { user } = render(<Login />, { route: '/login' });
+      const { user } = await renderLogin({ route: '/login' });
 
       await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
 
@@ -221,7 +270,7 @@ describe('Login Page', () => {
 
     it("keeps the server's words for a disabled account", async () => {
       serve({ google_client_id: CLIENT_ID }, () => mockFetchError('This account is disabled', 403));
-      const { user } = render(<Login />);
+      const { user } = await renderLogin();
 
       await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
 
@@ -231,7 +280,7 @@ describe('Login Page', () => {
     it('says so when the Google window is closed, and sends nothing to the server', async () => {
       popupAnswers = (config) => config.error_callback?.({ type: 'popup_closed' });
       serve({ google_client_id: CLIENT_ID });
-      const { user } = render(<Login />);
+      const { user } = await renderLogin();
 
       const button = await screen.findByRole('button', { name: /sign in with google/i });
       await user.click(button);
@@ -244,7 +293,7 @@ describe('Login Page', () => {
 
     it('shows a plain failure when the server cannot complete the sign-in', async () => {
       serve({ google_client_id: CLIENT_ID }, () => mockFetchError('Could not reach Google; try again', 502));
-      const { user } = render(<Login />);
+      const { user } = await renderLogin();
 
       await user.click(await screen.findByRole('button', { name: /sign in with google/i }));
 
@@ -292,7 +341,7 @@ describe('Login Page', () => {
       return mockFetchResponse({ passkeys_enabled: true });
     }) as any);
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     await user.type(screen.getByLabelText(/email address/i), 'admin@example.com');
     await user.click(screen.getByRole('button', { name: /sign in with passkey/i }));
 
@@ -327,7 +376,7 @@ describe('Login Page', () => {
 
     it('is shown on an instance with passkeys enabled', async () => {
       settingsAnswer({ passkeys_enabled: true });
-      render(<Login />);
+      await renderLogin();
 
       await waitFor(() => {
         expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/auth/settings'));
@@ -337,7 +386,7 @@ describe('Login Page', () => {
 
     it('is hidden, with its hint, once the instance reports passkeys disabled', async () => {
       settingsAnswer({ passkeys_enabled: false });
-      render(<Login />);
+      await renderLogin();
 
       await waitFor(() => {
         expect(passkeyButton()).not.toBeInTheDocument();
@@ -349,7 +398,7 @@ describe('Login Page', () => {
 
     it('stays when the settings cannot be read, since the password form does not depend on them', async () => {
       vi.mocked(global.fetch).mockRejectedValue(new Error('offline'));
-      render(<Login />);
+      await renderLogin();
 
       await waitFor(() => {
         expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/auth/settings'));
@@ -364,7 +413,7 @@ describe('Login Page', () => {
     );
     const unblock = blockSiteStorage();
     try {
-      const { user } = render(<Login />);
+      const { user } = await renderLogin();
 
       await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
       await user.type(screen.getByLabelText(/password/i), 'password123');
@@ -386,7 +435,7 @@ describe('Login Page', () => {
       return mockFetchResponse({ require_email_verification: true, passkeys_enabled: true });
     }) as any);
 
-    const { user } = render(<Login />, { route: '/login' });
+    const { user } = await renderLogin({ route: '/login' });
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');
     await user.click(screen.getByRole('button', { name: /^sign in$/i }));
@@ -404,7 +453,7 @@ describe('Login Page', () => {
       return mockFetchResponse({ require_email_verification: false, passkeys_enabled: true });
     }) as any);
 
-    const { user } = render(<Login />, { route: '/login' });
+    const { user } = await renderLogin({ route: '/login' });
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');
     await user.click(screen.getByRole('button', { name: /^sign in$/i }));
@@ -426,7 +475,7 @@ describe('Login Page', () => {
       return mockFetchResponse({ require_email_verification: true, passkeys_enabled: true });
     }) as any);
 
-    const { user } = render(<Login />, { route: '/login' });
+    const { user } = await renderLogin({ route: '/login' });
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');
     await user.click(screen.getByRole('button', { name: /^sign in$/i }));
@@ -454,7 +503,7 @@ describe('Login Page', () => {
       mockFetchError('Invalid credentials', 401) as any
     );
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'wrongpassword');
@@ -480,7 +529,7 @@ describe('Login Page', () => {
     vi.mocked(global.fetch).mockImplementation(((url: string) =>
       String(url).includes('/auth/login') ? rateLimited() : mockFetchResponse({})) as any);
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');
     await user.click(screen.getByRole('button', { name: /sign in/i }));
@@ -499,7 +548,7 @@ describe('Login Page', () => {
           })
         : mockFetchResponse({})) as any);
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');
     await user.click(screen.getByRole('button', { name: /sign in/i }));
@@ -516,7 +565,7 @@ describe('Login Page', () => {
     vi.mocked(global.fetch).mockImplementation(((url: string) =>
       String(url).includes('/passkey/login/start') ? rateLimited() : mockFetchResponse({})) as any);
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.click(await screen.findByRole('button', { name: /sign in with passkey/i }));
 
@@ -528,7 +577,7 @@ describe('Login Page', () => {
       new Promise(resolve => setTimeout(() => resolve(mockFetchResponse({ token: mockToken }) as any), 100))
     );
 
-    const { user } = render(<Login />);
+    const { user } = await renderLogin();
     
     await user.type(screen.getByLabelText(/email address/i), 'test@example.com');
     await user.type(screen.getByLabelText(/password/i), 'password123');

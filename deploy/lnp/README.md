@@ -45,7 +45,7 @@ The host's reverse proxy sends `ldr.now` to 127.0.0.1:3101 and `links.leadership
 
 ## Google sign-in
 
-The dashboard's login page has one button, "Sign in with Google". The backend accepts an account only if Google says its email is verified, the email is at `leadershipnowproject.com` or `leadershipnowproject.org`, and the account is a Google Workspace account of that same domain (the `hd` claim; `GOOGLE_REQUIRE_HD=false` drops this last check). Someone who already has an account keeps it, with their links: accounts are matched by email.
+The dashboard's login page has one button, "Sign in with Google". The backend accepts an account only if Google says its email is verified, the email is at `leadershipnowproject.com` or `leadershipnowproject.org`, and the account is a Google Workspace account of one of those two domains (the `hd` claim, which may name either; `GOOGLE_REQUIRE_HD=false` drops this last check). Someone who already has an account keeps it, with their links: accounts are matched by email.
 
 Google Cloud, project `lnp-links`:
 

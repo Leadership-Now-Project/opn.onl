@@ -16,7 +16,7 @@
 //! | `GOOGLE_CLIENT_ID` | OAuth 2.0 Web client id; also the expected `aud` |
 //! | `GOOGLE_CLIENT_SECRET` | that client's secret |
 //! | `GOOGLE_ALLOWED_DOMAINS` | comma-separated email domains that may sign in |
-//! | `GOOGLE_REQUIRE_HD` | default true: the token's `hd` (Workspace domain) must be present and equal the email's domain, which keeps out consumer accounts that merely use such an address |
+//! | `GOOGLE_REQUIRE_HD` | default true: the token's `hd` (Workspace domain) must be present and be one of the allowed domains, which keeps out consumer accounts that merely use such an address |
 //!
 //! The code, the tokens and the secret are never logged.
 
@@ -140,7 +140,7 @@ pub enum IdTokenError {
     Invalid(String),
     EmailNotVerified,
     DomainNotAllowed,
-    /// `hd` is missing or is not the email's domain.
+    /// `hd` is missing or is not one of the allowed domains.
     HostedDomainMismatch,
 }
 
@@ -199,7 +199,7 @@ impl SignInError {
             Self::Token(IdTokenError::EmailNotVerified) => "email not verified".to_string(),
             Self::Token(IdTokenError::DomainNotAllowed) => "email domain not allowed".to_string(),
             Self::Token(IdTokenError::HostedDomainMismatch) => {
-                "hd claim missing or not the email's domain".to_string()
+                "hd claim missing or not an allowed domain".to_string()
             }
         }
     }
@@ -252,11 +252,15 @@ pub fn verify_id_token(
         return Err(IdTokenError::DomainNotAllowed);
     }
     if config.require_hd {
+        // `hd` is the Workspace the account belongs to. It need not be the
+        // email's own domain: for a user on a secondary domain Google may
+        // report the organisation's primary one. A consumer account has none.
         let hd = claims
             .hd
             .as_deref()
             .map(|hd| hd.trim().to_ascii_lowercase());
-        if hd.as_deref() != Some(domain) {
+        let hd_allowed = |hd: &str| config.allowed_domains.iter().any(|d| d == hd);
+        if !hd.as_deref().is_some_and(hd_allowed) {
             return Err(IdTokenError::HostedDomainMismatch);
         }
     }
@@ -654,8 +658,13 @@ mod tests {
     }
 
     #[test]
-    fn hd_that_is_not_the_emails_domain_is_refused() {
-        for hd in ["example.org", "leadershipnowproject.org", ""] {
+    fn hd_outside_the_allowed_domains_is_refused() {
+        for hd in [
+            "example.org",
+            "gmail.com",
+            "evil-leadershipnowproject.com",
+            "",
+        ] {
             let mut c = claims("a@leadershipnowproject.com");
             c["hd"] = json!(hd);
             assert_eq!(
@@ -664,6 +673,28 @@ mod tests {
                 "{hd}"
             );
         }
+    }
+
+    #[test]
+    fn hd_may_be_another_allowed_domain_than_the_emails() {
+        // Google may report the Workspace's primary domain for a user whose
+        // address is on a secondary one.
+        let mut c = claims("jane@leadershipnowproject.org");
+        c["hd"] = json!("leadershipnowproject.com");
+        assert_eq!(
+            verify(c, &config()),
+            Ok("jane@leadershipnowproject.org".to_string())
+        );
+        let mut c = claims("sam@leadershipnowproject.com");
+        c["hd"] = json!("LeadershipNowProject.ORG");
+        assert!(verify(c, &config()).is_ok());
+    }
+
+    #[test]
+    fn an_allowed_hd_does_not_admit_an_email_outside_the_allowed_domains() {
+        let mut c = claims("a@gmail.com");
+        c["hd"] = json!("leadershipnowproject.com");
+        assert_eq!(verify(c, &config()), Err(IdTokenError::DomainNotAllowed));
     }
 
     #[test]

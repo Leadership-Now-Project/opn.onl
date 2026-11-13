@@ -120,6 +120,11 @@ export default function Login() {
     // the page then offers only that.
     const [googleClientId, setGoogleClientId] = useState<string | null>(null);
     const [googleLoading, setGoogleLoading] = useState(false);
+    // False until the /auth/settings request has settled, either way. Until
+    // then the page does not know which way of signing in to offer, so it
+    // offers none: the password form would otherwise show for a moment on an
+    // instance that signs in with Google.
+    const [settingsSettled, setSettingsSettled] = useState(false);
     const navigate = useNavigate();
 
     // Redirect to dashboard if already logged in. Nobody is signed in just by
@@ -146,6 +151,8 @@ export default function Login() {
             } catch {
                 // Offline or an unreadable answer: keep the default. Signing in
                 // with a password does not depend on it.
+            } finally {
+                if (!cancelled) setSettingsSettled(true);
             }
         })();
         return () => { cancelled = true; };
@@ -419,7 +426,7 @@ export default function Login() {
                 <div className="mb-8 text-center">
                     <p className="font-mono text-xs uppercase tracking-[0.2em] text-primary-600">Welcome back</p>
                     <h1 className="mt-3 font-display text-3xl font-extrabold tracking-tight text-ink">Sign in to opn.onl</h1>
-                    {!googleClientId && (
+                    {settingsSettled && !googleClientId && (
                     <p className="mt-2 text-sm text-muted">
                         New here?{' '}
                         <Link to="/register" className="font-medium text-primary-600 underline decoration-primary-300 underline-offset-2 hover:decoration-primary-600 hover:text-primary-700">Create an account</Link>
@@ -427,7 +434,15 @@ export default function Login() {
                     )}
                 </div>
 
-                {googleClientId ? (
+                {!settingsSettled ? (
+                <div
+                    role="status"
+                    aria-label="Loading sign-in options"
+                    className="flex justify-center rounded-2xl border border-line bg-surface p-8 shadow-card"
+                >
+                    <Loader2 className="h-6 w-6 animate-spin text-faint" aria-hidden="true" />
+                </div>
+                ) : googleClientId ? (
                 <div className="rounded-2xl border border-line bg-surface p-8 shadow-card">
                     <button
                         type="button"
