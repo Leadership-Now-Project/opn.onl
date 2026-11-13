@@ -2,6 +2,7 @@
 // In development, this uses localhost. In production, set VITE_API_URL environment variable.
 
 import { safeLocalStorage } from '../utils/storage';
+import { forgetDriveToken } from '../utils/driveToken';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
@@ -194,6 +195,7 @@ const handleUnauthorized = (requestToken: string | null) => {
 
     safeLocalStorage.removeItem('token');
     safeLocalStorage.removeItem('is_admin');
+    forgetDriveToken();
     // Redirect to login page
     window.location.href = '/login';
 };

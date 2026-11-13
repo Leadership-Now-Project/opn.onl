@@ -12,6 +12,7 @@ import BioSettingsSection from './BioSettingsSection';
 import logger from '../utils/logger';
 import { formatDate, isSafeHttpUrl } from '../utils';
 import { safeLocalStorage } from '../utils/storage';
+import { forgetDriveToken } from '../utils/driveToken';
 
 interface Passkey {
     id: number;
@@ -375,6 +376,7 @@ export default function Settings() {
             }
 
             safeLocalStorage.removeItem('token');
+            forgetDriveToken();
             navigate('/');
         } catch (err) {
             setError(errorMessage(err));

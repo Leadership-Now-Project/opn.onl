@@ -57,6 +57,11 @@ pub struct DriveFileRef {
     pub mime_type: String,
 }
 
+// The dashboard applies these same limits before it asks Google to change a
+// file's sharing (`DRIVE_LINK_LIMITS`, `driveLinkProblem`, `cleanDriveName`
+// and `isDriveLinkUrl` in `frontend/src/utils/googleDrive.ts`): a link refused
+// here after that change would leave the file public with no link. Change
+// both sides together.
 const MAX_FILE_ID_LEN: usize = 200;
 const MAX_NAME_CHARS: usize = 500;
 const MAX_MIME_TYPE_LEN: usize = 255;
@@ -81,8 +86,11 @@ impl DriveFileRef {
             return Err("drive_file.name contains control characters");
         }
         let mime_type = self.mime_type.trim();
-        if mime_type.len() > MAX_MIME_TYPE_LEN || mime_type.chars().any(char::is_control) {
+        if mime_type.len() > MAX_MIME_TYPE_LEN {
             return Err("drive_file.mime_type is too long");
+        }
+        if mime_type.chars().any(char::is_control) {
+            return Err("drive_file.mime_type contains control characters");
         }
         Ok(Self {
             file_id: file_id.to_string(),
@@ -196,6 +204,13 @@ mod tests {
         assert!(file("abc", &"n".repeat(501), "x/y").checked().is_err());
         assert!(file("abc", "a\nb", "x/y").checked().is_err());
         assert!(file("abc", "a", &"m".repeat(256)).checked().is_err());
+        assert!(file("abc", "a", &"m".repeat(255)).checked().is_ok());
+        // A control character inside the type (one at the end is trimmed).
+        assert_eq!(
+            file("abc", "a", "text/\u{7}plain").checked().unwrap_err(),
+            "drive_file.mime_type contains control characters"
+        );
+        assert!(file("abc", "a", "text/pl\nain").checked().is_err());
         // Drive does not always name a type.
         assert!(file("abc", "a", "").checked().is_ok());
     }

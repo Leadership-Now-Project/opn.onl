@@ -3,6 +3,7 @@ import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Github, LogOut, Menu, X, User, Settings, LayoutDashboard, BarChart2, Shield, Users } from 'lucide-react';
 import Logo from './Logo';
 import { safeLocalStorage } from '../utils/storage';
+import { forgetDriveToken } from '../utils/driveToken';
 import { IS_LNP, SOURCE_URL } from '../config/theme';
 import { googleSignInClientId } from '../config/api';
 import { NARROW_PAGE, WIDE_PAGE } from './pageWidth';
@@ -45,6 +46,8 @@ export default function Layout() {
     const handleLogout = () => {
         safeLocalStorage.removeItem('token');
         safeLocalStorage.removeItem('is_admin');
+        // The next person to sign in on this tab must not inherit it.
+        forgetDriveToken();
         closeMenus();
         navigate('/login');
     };

@@ -7,13 +7,17 @@
 // https://developers.google.com/identity/oauth2/web/guides/use-token-model
 // https://developers.google.com/workspace/drive/picker/guides/web-picker
 
+import { cachedDriveToken, forgetDriveToken, rememberDriveToken } from './driveToken';
+
+export { forgetDriveToken };
+
 /** The one scope asked for: files the person opens or picks with this app. */
 export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
 const GSI_SCRIPT_URL = 'https://accounts.google.com/gsi/client';
 const GAPI_SCRIPT_URL = 'https://apis.google.com/js/api.js';
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
-const FILE_FIELDS = 'id,name,mimeType,webViewLink,iconLink,permissions(id,type,role,domain,allowFileDiscovery),capabilities(canShare),driveId';
+const FILE_FIELDS = 'id,name,mimeType,webViewLink,permissions(id,type,role,domain,allowFileDiscovery),capabilities(canShare)';
 const PERMISSION_FIELDS = 'nextPageToken,permissions(id,type,role,domain,allowFileDiscovery)';
 const FOLDER_MIME_TYPE = 'application/vnd.google-apps.folder';
 /** A token this close to its end is not handed out again. */
@@ -51,7 +55,12 @@ interface PickerBuilder {
     setDeveloperKey(key: string): PickerBuilder;
     setAppId(appId: string): PickerBuilder;
     setCallback(callback: (data: Record<string, unknown>) => void): PickerBuilder;
-    build(): { setVisible(visible: boolean): void };
+    build(): BuiltPicker;
+}
+
+interface BuiltPicker {
+    setVisible(visible: boolean): void;
+    dispose?: () => void;
 }
 
 interface PickerApi {
@@ -59,7 +68,7 @@ interface PickerApi {
     DocsView: new (viewId?: unknown) => PickerView;
     ViewId: { DOCS: unknown };
     DocsViewMode: { LIST: unknown };
-    Action: { PICKED: string; CANCEL: string };
+    Action: { PICKED: string; CANCEL: string; ERROR?: string };
     Response: { ACTION: string; DOCUMENTS: string };
     Document: { ID: string };
 }
@@ -125,13 +134,7 @@ export class DriveError extends Error {
 }
 
 const LOAD_FAILED = 'Could not load Google Drive. Check your connection and try again.';
-
-let cachedToken: { clientId: string; token: string; expiresAt: number } | null = null;
-
-/** Drop the token held in memory, so the next request asks Google again. */
-export function forgetDriveToken(): void {
-    cachedToken = null;
-}
+const PICKER_FAILED = 'Google\'s file picker could not be opened. Click Google Drive Files to try again.';
 
 /**
  * An access token for the files the person picks, and nothing else in their
@@ -142,10 +145,11 @@ export async function driveAccessToken(
     request: { clientId: string; loginHint?: string | null },
     env: DriveEnv = browserDriveEnv,
 ): Promise<string> {
-    if (cachedToken && cachedToken.clientId === request.clientId && cachedToken.expiresAt - TOKEN_MARGIN_MS > env.now()) {
-        return cachedToken.token;
+    const cached = cachedDriveToken();
+    if (cached && cached.clientId === request.clientId && cached.expiresAt - TOKEN_MARGIN_MS > env.now()) {
+        return cached.token;
     }
-    cachedToken = null;
+    forgetDriveToken();
     if (!env.google()?.accounts?.oauth2) {
         await env.loadScript(GSI_SCRIPT_URL).catch(() => { throw new DriveError(LOAD_FAILED); });
     }
@@ -175,20 +179,30 @@ export async function driveAccessToken(
         throw new DriveError('Google Drive access was not given, so no file can be picked. Click Google Drive Files to try again.');
     }
     const lifetime = Number(response.expires_in);
-    cachedToken = {
+    rememberDriveToken({
         clientId: request.clientId,
         token: response.access_token,
         expiresAt: env.now() + (Number.isFinite(lifetime) ? lifetime : 0) * 1000,
-    };
+    });
     return response.access_token;
 }
+
+/** Gives up on the picker that is open, when a newer one replaces it. */
+let abandonOpenPicker: (() => void) | null = null;
 
 /**
  * Open Google's file picker over the page. Resolves with the id of the one
  * file picked, or `null` when the person closes the picker without picking.
+ *
+ * Google gives no signal when the picker's frame fails to appear, and a
+ * person may browse it for as long as they like, so nothing here times out.
+ * Instead `onShown` is called once the picker has been asked to show: from
+ * then on the caller can let the person click again. A second call closes
+ * the earlier picker, whose promise resolves `null`. A picker that cannot be
+ * built, or that reports an error, rejects with words for the person.
  */
 export async function pickDriveFile(
-    request: { token: string; apiKey: string; appId: string },
+    request: { token: string; apiKey: string; appId: string; onShown?: () => void },
     env: DriveEnv = browserDriveEnv,
 ): Promise<string | null> {
     if (!env.google()?.picker) {
@@ -205,33 +219,61 @@ export async function pickDriveFile(
     const picker = env.google()?.picker;
     if (!picker) throw new DriveError(LOAD_FAILED);
 
-    return new Promise<string | null>((resolve) => {
-        // List mode: with the drive.file scope Google shows no thumbnails.
-        // Folders are shown to browse into, never to pick.
-        const view = () => new picker.DocsView(picker.ViewId.DOCS)
-            .setIncludeFolders(true)
-            .setSelectFolderEnabled(false)
-            .setMode(picker.DocsViewMode.LIST);
-        // My Drive, then shared drives. One file at a time:
-        // MULTISELECT_ENABLED is left off.
-        new picker.PickerBuilder()
-            .addView(view())
-            .addView(view().setEnableDrives(true))
-            .setOAuthToken(request.token)
-            .setDeveloperKey(request.apiKey)
-            .setAppId(request.appId)
-            .setCallback((data) => {
-                const action = data[picker.Response.ACTION];
-                if (action === picker.Action.PICKED) {
-                    const documents = data[picker.Response.DOCUMENTS] as Record<string, unknown>[] | undefined;
-                    const id = documents?.[0]?.[picker.Document.ID];
-                    resolve(typeof id === 'string' && id ? id : null);
-                } else if (action === picker.Action.CANCEL) {
-                    resolve(null);
-                }
-            })
-            .build()
-            .setVisible(true);
+    abandonOpenPicker?.();
+
+    return new Promise<string | null>((resolve, reject) => {
+        let built: BuiltPicker | null = null;
+        let settled = false;
+        const settle = (finish: () => void) => {
+            if (settled) return;
+            settled = true;
+            if (abandonOpenPicker === abandon) abandonOpenPicker = null;
+            finish();
+        };
+        const abandon = () => settle(() => {
+            try {
+                built?.setVisible(false);
+                built?.dispose?.();
+            } catch {
+                // It is gone already.
+            }
+            resolve(null);
+        });
+        try {
+            // List mode: with the drive.file scope Google shows no thumbnails.
+            // Folders are shown to browse into, never to pick.
+            const view = () => new picker.DocsView(picker.ViewId.DOCS)
+                .setIncludeFolders(true)
+                .setSelectFolderEnabled(false)
+                .setMode(picker.DocsViewMode.LIST);
+            // My Drive, then shared drives. One file at a time:
+            // MULTISELECT_ENABLED is left off.
+            built = new picker.PickerBuilder()
+                .addView(view())
+                .addView(view().setEnableDrives(true))
+                .setOAuthToken(request.token)
+                .setDeveloperKey(request.apiKey)
+                .setAppId(request.appId)
+                .setCallback((data) => {
+                    const action = data[picker.Response.ACTION];
+                    if (action === picker.Action.PICKED) {
+                        const documents = data[picker.Response.DOCUMENTS] as Record<string, unknown>[] | undefined;
+                        const id = documents?.[0]?.[picker.Document.ID];
+                        settle(() => resolve(typeof id === 'string' && id ? id : null));
+                    } else if (action === picker.Action.CANCEL) {
+                        settle(() => resolve(null));
+                    } else if (action === (picker.Action.ERROR ?? 'error')) {
+                        settle(() => reject(new DriveError(PICKER_FAILED)));
+                    }
+                })
+                .build();
+            abandonOpenPicker = abandon;
+            built.setVisible(true);
+        } catch {
+            settle(() => reject(new DriveError(PICKER_FAILED)));
+            return;
+        }
+        request.onShown?.();
     });
 }
 
@@ -243,9 +285,20 @@ export interface DrivePermission {
     allowFileDiscovery?: boolean;
 }
 
+/** What someone who opens the file may do with it. */
+export type DriveAccess = 'view' | 'comment' | 'edit';
+
+const ACCESS_ORDER: DriveAccess[] = ['view', 'comment', 'edit'];
+
+function accessOf(role: string | undefined): DriveAccess {
+    if (role === 'commenter') return 'comment';
+    if (role === 'writer' || role === 'fileOrganizer' || role === 'organizer' || role === 'owner') return 'edit';
+    return 'view';
+}
+
 /** Who can open a Drive file with its link, as far as Google told us. */
 export type DriveSharing =
-    | { kind: 'anyone' }
+    | { kind: 'anyone'; access: DriveAccess }
     | { kind: 'domain'; domain: string }
     | { kind: 'restricted' }
     /** Google would not list the file's permissions to this person. */
@@ -263,7 +316,12 @@ export interface DriveFile {
 
 export function sharingOf(permissions: DrivePermission[] | null): DriveSharing {
     if (!permissions) return { kind: 'unknown' };
-    if (permissions.some(p => p.type === 'anyone')) return { kind: 'anyone' };
+    const anyone = permissions.filter(p => p.type === 'anyone');
+    if (anyone.length > 0) {
+        // The most that "anyone" may do, when several permissions say so.
+        const most = Math.max(...anyone.map(p => ACCESS_ORDER.indexOf(accessOf(p.role))));
+        return { kind: 'anyone', access: ACCESS_ORDER[most] };
+    }
     const domain = permissions.find(p => p.type === 'domain');
     if (domain) return { kind: 'domain', domain: domain.domain ?? '' };
     return { kind: 'restricted' };
@@ -272,11 +330,88 @@ export function sharingOf(permissions: DrivePermission[] | null): DriveSharing {
 /** The file's sharing in plain words. */
 export function describeSharing(sharing: DriveSharing): string {
     switch (sharing.kind) {
-        case 'anyone': return 'Anyone with the link can view';
+        case 'anyone': return `Anyone with the link can ${sharing.access}`;
         case 'domain': return `Only people at ${sharing.domain || 'your organization'} with the link`;
         case 'restricted': return 'Restricted: only people it is shared with';
         case 'unknown': return 'Sharing could not be read for this file';
     }
+}
+
+/**
+ * What `POST /links` accepts for a Drive file. The backend twin is
+ * `DriveFileRef::checked` and `is_drive_url` in `backend/src/utils/drive.rs`,
+ * and `MAX_TITLE_CHARS` in `backend/src/handlers/links.rs`: change them
+ * together. The browser applies the same rules BEFORE it asks Google to
+ * change a file's sharing, so a file is never made public for a link our own
+ * server would then refuse.
+ */
+export const DRIVE_LINK_LIMITS = {
+    /** Bytes, of `[A-Za-z0-9_-]` only. */
+    fileIdLength: 200,
+    /** Characters (code points), none of them a control character. */
+    nameChars: 500,
+    /** Bytes of UTF-8, none of them a control character. */
+    mimeTypeBytes: 255,
+    /** Characters (code points) of a link's title. */
+    titleChars: 500,
+} as const;
+
+const DRIVE_LINK_HOSTS = ['docs.google.com', 'drive.google.com'];
+// Unicode's Cc, which is what Rust's `char::is_control` tests.
+const CONTROL_CHARACTERS = /\p{Cc}/gu;
+
+/** `https` on docs.google.com or drive.google.com, on the default port. */
+export function isDriveLinkUrl(url: string): boolean {
+    // The browser's URL parser drops tabs and line breaks; our server refuses them.
+    if (/\p{Cc}/u.test(url)) return false;
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return false;
+    }
+    return parsed.protocol === 'https:'
+        && parsed.port === ''
+        && parsed.username === ''
+        && parsed.password === ''
+        && DRIVE_LINK_HOSTS.includes(parsed.hostname);
+}
+
+/** The file's name as our server will store it: no control characters, 1 to 500 characters. */
+export function cleanDriveName(name: string | undefined): string {
+    const kept = Array.from((name ?? '').replace(CONTROL_CHARACTERS, '').trim())
+        .slice(0, DRIVE_LINK_LIMITS.nameChars)
+        .join('')
+        .trim();
+    return kept || 'Untitled';
+}
+
+/** The file's type as our server will store it: no control characters, at most 255 bytes. */
+export function cleanDriveMimeType(mimeType: string | undefined): string {
+    const encoder = new TextEncoder();
+    let kept = '';
+    let bytes = 0;
+    for (const character of (mimeType ?? '').replace(CONTROL_CHARACTERS, '').trim()) {
+        bytes += encoder.encode(character).length;
+        if (bytes > DRIVE_LINK_LIMITS.mimeTypeBytes) break;
+        kept += character;
+    }
+    return kept.trim();
+}
+
+export const UNSUPPORTED_DRIVE_FILE = 'This kind of Google file cannot be shared from here yet.';
+
+/**
+ * Why our server would refuse a link to this Drive file, in words for the
+ * person, or `null` when it would not. The name and the type are not checked:
+ * `readDriveFile` has already cleaned them so that they always pass.
+ */
+export function driveLinkProblem(file: { id: string; webViewLink: string }): string | null {
+    if (!isDriveLinkUrl(file.webViewLink)) return UNSUPPORTED_DRIVE_FILE;
+    if (file.id.length > DRIVE_LINK_LIMITS.fileIdLength || !/^[A-Za-z0-9_-]+$/.test(file.id)) {
+        return 'This file cannot be shared from here: Google Drive gave it an id this app cannot store.';
+    }
+    return null;
 }
 
 /** Google's own explanation of a refused call, or `fallback` when it sent none. */
@@ -329,8 +464,8 @@ export async function readDriveFile(fileId: string, token: string, env: DriveEnv
 
     return {
         id: file.id,
-        name: file.name || 'Untitled',
-        mimeType: file.mimeType ?? '',
+        name: cleanDriveName(file.name),
+        mimeType: cleanDriveMimeType(file.mimeType),
         webViewLink: file.webViewLink,
         sharing: sharingOf(permissions),
         canShare: file.capabilities?.canShare === true,

@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '../test/test-utils';
 import { blockSiteStorage } from '../test/helpers';
 import ErrorBoundary from './ErrorBoundary';
 import Layout from './Layout';
+import { cachedDriveToken, rememberDriveToken } from '../utils/driveToken';
 
 // Mock the Outlet component from react-router-dom
 vi.mock('react-router-dom', async () => {
@@ -170,6 +171,9 @@ describe('Layout Component', () => {
             // logout address instead. It no longer means anything.
             vi.stubEnv('VITE_CF_ACCESS', 'true');
             const fetchCalls = vi.mocked(global.fetch).mock.calls.length;
+            // A Google Drive token from this session: the next person to sign
+            // in on this tab must not find it.
+            rememberDriveToken({ clientId: 'client-1', token: 'ya29.this-session', expiresAt: Date.now() + 3_600_000 });
             try {
                 const { user } = render(<Layout />, { route: '/dashboard' });
 
@@ -178,6 +182,7 @@ describe('Layout Component', () => {
 
                 expect(localStorage.removeItem).toHaveBeenCalledWith('token');
                 expect(localStorage.removeItem).toHaveBeenCalledWith('is_admin');
+                expect(cachedDriveToken()).toBeNull();
                 expect(window.location.pathname).toBe('/login');
                 // And no request that could sign the visitor straight back in.
                 expect(vi.mocked(global.fetch).mock.calls.length).toBe(fetchCalls);

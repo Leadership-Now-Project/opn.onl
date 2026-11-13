@@ -1,12 +1,14 @@
 import { useRef, useState, type FormEvent } from 'react';
 import { File, FileSpreadsheet, FileText, Film, Image, Music, Presentation, X, type LucideIcon } from 'lucide-react';
-import { API_ENDPOINTS, authFetch, failureMessage, responseError, shortLinkBase } from '../../config/api';
+import { API_ENDPOINTS, authFetch, failureMessage, responseError, shortLinkBase, type CheckCodeResponse } from '../../config/api';
 import logger from '../../utils/logger';
 import {
     browserDriveEnv,
     describeSharing,
     driveAccessToken,
     DriveError,
+    DRIVE_LINK_LIMITS,
+    driveLinkProblem,
     emailFromToken,
     pickDriveFile,
     readDriveFile,
@@ -46,11 +48,23 @@ function typeIcon(mimeType: string): LucideIcon {
     return File;
 }
 
+/** What the person is told when the link fails after the sharing was changed. */
+const SHARING_WAS_CHANGED = 'The file\'s sharing in Google Drive was changed to "anyone with the link can view", but no link was created.';
+const AFTER_CHANGE_ADVICE = 'You can try again here (the sharing will not be changed a second time) or change the sharing back in Google Drive.';
+
+/** Why the link was not made, with what happened to the file's sharing when it was changed first. */
+function linkFailure(sharingChanged: boolean, reason: string): string {
+    if (!sharingChanged) return reason;
+    const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+    return `${SHARING_WAS_CHANGED} Reason: ${sentence} ${AFTER_CHANGE_ADVICE}`;
+}
+
 /**
  * "Google Drive Files": pick one file in Google's picker and share it as a
  * short link to where it lives in Drive. The file's sharing is read and shown
  * before the link is made, and changed only when the person ticks the box and
- * clicks Create.
+ * clicks Create. Everything our own server would refuse is checked before
+ * that change, and a link that still fails after it says the sharing changed.
  */
 export default function DriveFilePanel({ appSettings, onCreated, orgId = null, driveEnv = browserDriveEnv }: DriveFilePanelProps) {
     const drive = appSettings.drive;
@@ -58,15 +72,22 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
     const ready = Boolean(drive?.api_key && drive?.app_id && clientId);
 
     const [opening, setOpening] = useState(false);
+    // Google's picker has been asked to show; what happens in it is not ours to see.
+    const [pickerShown, setPickerShown] = useState(false);
     const [creating, setCreating] = useState(false);
     const [file, setFile] = useState<DriveFile | null>(null);
     const [makePublic, setMakePublic] = useState(false);
+    // This panel changed the picked file's sharing and no link exists for it yet.
+    const [sharingChanged, setSharingChanged] = useState(false);
     const [alias, setAlias] = useState('');
     const [title, setTitle] = useState('');
     const [expiresAt, setExpiresAt] = useState('');
     const [error, setError] = useState('');
     const [shared, setShared] = useState<{ url: string; warning: string } | null>(null);
     const inFlight = useRef(false);
+    // Which click on "Google Drive Files" is the current one. A picker that
+    // never answers is left behind by the next click, or by Create.
+    const pickRun = useRef(0);
 
     const token = () => driveAccessToken(
         { clientId: clientId ?? '', loginHint: emailFromToken(safeLocalStorage.getItem('token')) },
@@ -76,6 +97,7 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
     const reset = () => {
         setFile(null);
         setMakePublic(false);
+        setSharingChanged(false);
         setAlias('');
         setTitle('');
         setExpiresAt('');
@@ -83,26 +105,67 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
 
     const choose = async () => {
         if (!ready || !drive || inFlight.current) return;
+        pickRun.current += 1;
+        const run = pickRun.current;
+        const current = () => run === pickRun.current;
         inFlight.current = true;
         setOpening(true);
+        setPickerShown(false);
         setError('');
         setShared(null);
         try {
             const accessToken = await token();
-            const fileId = await pickDriveFile({ token: accessToken, apiKey: drive.api_key, appId: drive.app_id }, driveEnv);
+            const fileId = await pickDriveFile({
+                token: accessToken,
+                apiKey: drive.api_key,
+                appId: drive.app_id,
+                // The picker is Google's from here, and it may never answer
+                // (a frame that did not load says nothing). The button is
+                // given back so the person is never stuck waiting for it.
+                onShown: () => {
+                    if (!current()) return;
+                    inFlight.current = false;
+                    setOpening(false);
+                    setPickerShown(true);
+                },
+            }, driveEnv);
+            // A newer click, or Create, has taken over: this answer is not wanted.
+            if (!current()) return;
+            setPickerShown(false);
             // Closing the picker without picking is not an error.
             if (!fileId) return;
+            inFlight.current = true;
+            setOpening(true);
             const picked = await readDriveFile(fileId, accessToken, driveEnv);
             reset();
+            // A file our server would refuse a link for is never offered:
+            // no tick, no Create, so its sharing cannot be changed for nothing.
+            const problem = driveLinkProblem(picked);
+            if (problem) {
+                setError(`"${picked.name}" was not added. ${problem}`);
+                return;
+            }
             setFile(picked);
             setTitle(picked.name);
         } catch (err) {
+            if (!current()) return;
+            setPickerShown(false);
             if (!(err instanceof DriveError)) logger.error('Failed to pick a Google Drive file', err);
             setError(err instanceof DriveError ? err.message : 'Google Drive could not be opened. Please try again.');
         } finally {
-            inFlight.current = false;
-            setOpening(false);
+            if (current()) {
+                inFlight.current = false;
+                setOpening(false);
+            }
         }
+    };
+
+    /** Why `alias` cannot be used, asked of our server; `null` when it is free. */
+    const aliasRefusal = async (code: string): Promise<string | null> => {
+        const res = await authFetch(`${API_ENDPOINTS.checkCode}?${new URLSearchParams({ code })}`);
+        if (!res.ok) return responseError(res, 'The alias could not be checked');
+        const answer = await res.json() as CheckCodeResponse;
+        return answer.available ? null : (answer.message || 'This alias is already taken');
     };
 
     const locked = file !== null && file.sharing.kind !== 'anyone';
@@ -126,14 +189,38 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
             }
             expiration = parsed.toISOString();
         }
+        if (Array.from(title.trim()).length > DRIVE_LINK_LIMITS.titleChars) {
+            setError(`Title must be at most ${DRIVE_LINK_LIMITS.titleChars} characters`);
+            return;
+        }
 
+        // A picker still open somewhere is left behind.
+        pickRun.current += 1;
+        setPickerShown(false);
         inFlight.current = true;
         setCreating(true);
+        let changed = sharingChanged;
         try {
             let current = file;
             // The one change this app ever makes in Drive: asked for by the
             // tick, sent by this click, and finished before any link exists.
             if (locked && makePublic && file.canShare) {
+                // The last thing our server could refuse that can be known
+                // beforehand: an alias someone else already has.
+                if (alias) {
+                    let refusal: string | null;
+                    try {
+                        refusal = await aliasRefusal(alias);
+                    } catch (err) {
+                        setError(failureMessage(err, 'The alias could not be checked, so the file\'s sharing was not changed and no link was created. Check your connection and try again.'));
+                        return;
+                    }
+                    if (refusal) {
+                        const sentence = /[.!?]$/.test(refusal) ? refusal : `${refusal}.`;
+                        setError(`${sentence} The file's sharing was not changed and no link was created.`);
+                        return;
+                    }
+                }
                 try {
                     await shareWithAnyone(file.id, await token(), driveEnv);
                 } catch (err) {
@@ -143,9 +230,13 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                         : 'The sharing could not be changed, so no link was created.');
                     return;
                 }
-                current = { ...file, sharing: { kind: 'anyone' } };
+                // Recorded at once: a retry must not ask Google again, and
+                // a link that now fails has to say the sharing changed.
+                current = { ...file, sharing: { kind: 'anyone', access: 'view' } };
                 setFile(current);
                 setMakePublic(false);
+                changed = true;
+                setSharingChanged(true);
             }
 
             const body: Record<string, unknown> = {
@@ -158,7 +249,7 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
             if (orgId != null) body.org_id = orgId;
             const res = await authFetch(API_ENDPOINTS.links, { method: 'POST', body: JSON.stringify(body) });
             if (!res.ok) {
-                setError(await responseError(res, 'The link could not be created'));
+                setError(linkFailure(changed, await responseError(res, 'The link could not be created')));
                 return;
             }
             const link = await res.json() as { code: string };
@@ -172,7 +263,9 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
             onCreated();
         } catch (err) {
             logger.error('Failed to share a Google Drive file', err);
-            setError(failureMessage(err, 'The link could not be created. Check your connection and try again.'));
+            // On a 401 `authFetch` has already sent the browser to /login;
+            // the message is set all the same, for as long as this page lasts.
+            setError(linkFailure(changed, failureMessage(err, 'The link could not be created. Check your connection and try again.')));
         } finally {
             inFlight.current = false;
             setCreating(false);
@@ -197,6 +290,11 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                 {!ready && <span className="text-xs font-normal text-faint">Not set up on this server</span>}
                 {opening && <span className="text-xs font-normal text-faint">Opening…</span>}
             </button>
+            {pickerShown && (
+                <p className="mt-1.5 text-xs text-faint">
+                    Google's file picker is open. If it did not appear, click Google Drive Files again.
+                </p>
+            )}
 
             {file && (
                 <form onSubmit={handleCreate} aria-label="Share a Google Drive file" className="mt-3 space-y-4 rounded-lg border border-line2 bg-paper p-4">
@@ -217,6 +315,11 @@ export default function DriveFilePanel({ appSettings, onCreated, orgId = null, d
                     <p className="text-sm text-muted">
                         Sharing in Google Drive: <span className="font-semibold text-ink">{describeSharing(file.sharing)}</span>
                     </p>
+                    {sharingChanged && (
+                        <p role="note" className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-ink">
+                            You changed this file's sharing to "anyone with the link can view" a moment ago. No link has been created for it yet.
+                        </p>
+                    )}
 
                     {locked && (
                         <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-ink">

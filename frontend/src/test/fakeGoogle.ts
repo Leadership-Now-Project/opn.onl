@@ -24,6 +24,10 @@ export interface FakeGoogle {
     driveCalls: DriveCall[];
     scriptsLoaded: string[];
     clock: { now: number };
+    /** Make a picker that is still open answer now: 0 is the first one opened. */
+    answerPicker: (index: number, pick: string | null) => void;
+    /** The options in use; a test may change them between two clicks. */
+    options: FakeGoogleOptions;
 }
 
 export interface FakeGoogleOptions {
@@ -31,6 +35,14 @@ export interface FakeGoogleOptions {
     token?: Record<string, unknown> | { errorType: string };
     /** The file id the person picks; `null` closes the picker without picking. */
     pick?: string | null;
+    /** The file ids picked by the first, second, ... picker; then `pick`. */
+    picks?: (string | null)[];
+    /** The picker opens and never answers (its frame did not load). */
+    pickerSilent?: boolean;
+    /** Building the picker throws. */
+    pickerThrows?: boolean;
+    /** The picker reports an error instead of a pick. */
+    pickerErrors?: boolean;
     /** The Drive API. Default: every call is a 404. */
     drive?: (call: DriveCall) => { status: number; body: unknown };
     /** Start with Google's scripts not yet on the page. */
@@ -49,6 +61,10 @@ export function fakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     const driveCalls: DriveCall[] = [];
     const scriptsLoaded: string[] = [];
     const clock = { now: 1_000_000 };
+    const openPickers: ((data: Record<string, unknown>) => void)[] = [];
+    const answer = (pick: string | null) => pick === null
+        ? { action: 'cancel' }
+        : { action: 'picked', docs: [{ id: pick, name: 'ignored' }] };
 
     class DocsView {
         calls: [string, ...unknown[]][] = [];
@@ -68,16 +84,24 @@ export function fakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
         enableFeature(feature: unknown) { pickerCalls.push(['enableFeature', feature]); return this; }
         setCallback(callback: (data: Record<string, unknown>) => void) { this.callback = callback; return this; }
         build() {
+            if (options.pickerThrows) throw new Error('The API developer key is invalid.');
             return {
                 setVisible: (visible: boolean) => {
                     pickerCalls.push(['setVisible', visible]);
+                    if (!visible) return;
+                    const index = openPickers.push(this.callback) - 1;
                     // Google first reports that the picker loaded.
                     this.callback({ action: 'loaded' });
-                    const pick = options.pick === undefined ? 'file-1' : options.pick;
-                    queueMicrotask(() => this.callback(pick === null
-                        ? { action: 'cancel' }
-                        : { action: 'picked', docs: [{ id: pick, name: 'ignored' }] }));
+                    if (options.pickerSilent) return;
+                    if (options.pickerErrors) {
+                        queueMicrotask(() => this.callback({ action: 'error' }));
+                        return;
+                    }
+                    const queued = options.picks && index < options.picks.length ? options.picks[index] : options.pick;
+                    const pick = queued === undefined ? 'file-1' : queued;
+                    queueMicrotask(() => this.callback(answer(pick)));
                 },
+                dispose: () => { pickerCalls.push(['dispose']); },
             };
         }
     }
@@ -156,7 +180,9 @@ export function fakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
         now: () => clock.now,
     };
 
-    return { env, tokenRequests, pickerCalls, driveCalls, scriptsLoaded, clock };
+    const answerPicker = (index: number, pick: string | null) => openPickers[index](answer(pick));
+
+    return { env, tokenRequests, pickerCalls, driveCalls, scriptsLoaded, clock, answerPicker, options };
 }
 
 /** A Drive file as `files.get` answers, with the given permissions. */
