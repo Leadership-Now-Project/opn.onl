@@ -1,11 +1,16 @@
 {
   "name": "lnp-links-mcp",
   "private": true,
-  "description": "opn-mcp over Streamable HTTP behind Cloudflare Access, for LNP Links",
+  "description": "opn-mcp over Streamable HTTP with its own OAuth 2.1 sign-in (Google, LNP accounts), for LNP Links",
   "type": "module",
   "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "express": "^5.2.1",
     "opn-mcp": "1.2.0"
   }
 }

@@ -91,6 +91,41 @@ jobs:
       - name: Image publication gate script
         run: bash .github/scripts/test-wait-for-ci.sh
 
+  # LNP deployment: the Claude connector (deploy/lnp/mcp) signs people in
+  # itself. Its tests run the whole OAuth flow against local stand-ins for
+  # Google and the backend, and read the nginx files to see that the backend's
+  # connector routes stay off the public hosts. Node 20 is the image's.
+  connector-test:
+    name: LNP connector (node --test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: deploy/lnp/mcp/package-lock.json
+
+      - name: Install deps
+        working-directory: deploy/lnp/mcp
+        run: npm ci --ignore-scripts
+
+      - name: Tests
+        working-directory: deploy/lnp/mcp
+        run: node --test
+
+      # The image copies the server's modules by name; one left out starts
+      # nowhere but in production.
+      - name: The image copies every module the server imports
+        working-directory: deploy/lnp/mcp
+        run: |
+          set -euo pipefail
+          for module in *.mjs; do
+            grep -Eq "^COPY .*\b${module//./\\.}\b" Dockerfile || { echo "Dockerfile does not copy $module"; exit 1; }
+          done
+
   frontend-test:
     name: Frontend (vitest + lint + build)
     runs-on: ubuntu-latest
@@ -268,6 +303,74 @@ jobs:
               echo "access log contains '$leaked'"
               exit 1
             fi
+          done
+
+      # LNP deployment: the backend's /auth/connector/google and, above all,
+      # /auth/connector/session (which trusts the Claude connector's shared
+      # secret, not a person) are for the connector alone, over the compose
+      # network. Neither public host may pass them on, with or without the
+      # deployment's nginx files. deploy/lnp/mcp/test/nginx.test.mjs reads the
+      # same files; this asks a running nginx.
+      - name: Connector sign-in routes are not reachable from the public hosts
+        run: |
+          set -euo pipefail
+
+          cat > "$RUNNER_TEMP/backend-reached.conf" <<'EOF'
+          server {
+              listen 3000;
+              location / {
+                  return 200 "REACHED-THE-BACKEND";
+              }
+          }
+          EOF
+
+          network=opn-connector-net
+          docker network create "$network"
+          backend_id=$(docker run --detach --name backend --network "$network" \
+            --volume "$RUNNER_TEMP/backend-reached.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:alpine)
+          stock_id=$(docker run --detach --network "$network" \
+            --publish 127.0.0.1:8091:80 opn-frontend-csp-smoke)
+          admin_id=$(docker run --detach --network "$network" \
+            --volume "$PWD/deploy/lnp/nginx/admin.conf:/etc/nginx/site.d/lnp.conf:ro" \
+            --publish 127.0.0.1:8092:80 opn-frontend-csp-smoke)
+          public_id=$(docker run --detach --network "$network" \
+            --volume "$PWD/deploy/lnp/nginx/public.conf:/etc/nginx/site.d/lnp.conf:ro" \
+            --publish 127.0.0.1:8093:80 opn-frontend-csp-smoke)
+          trap 'docker rm --force "$backend_id" "$stock_id" "$admin_id" "$public_id" >/dev/null; docker network rm "$network" >/dev/null' EXIT
+
+          # Control, and readiness: each host does proxy what it should, so a
+          # refusal below is the configuration's and not a dead upstream.
+          for target in 8091/abc123 8092/api/auth/settings 8093/api/abc123; do
+            for attempt in $(seq 1 20); do
+              if curl --silent "http://127.0.0.1:$target" | grep -q REACHED-THE-BACKEND; then
+                break
+              fi
+              sleep 1
+            done
+            curl --silent "http://127.0.0.1:$target" | grep -q REACHED-THE-BACKEND
+          done
+
+          check() { # port path expected-status
+            body=$(curl --silent --request POST --header 'Content-Type: application/json' \
+              --data '{}' --output - --write-out '\n%{http_code}' "http://127.0.0.1:$1$2")
+            status=${body##*$'\n'}
+            if printf '%s' "$body" | grep -q REACHED-THE-BACKEND; then
+              echo "port $1 passed $2 on to the backend"
+              exit 1
+            fi
+            if [ -n "$3" ] && [ "$status" != "$3" ]; then
+              echo "port $1 answered $status for $2, expected $3"
+              exit 1
+            fi
+          }
+          for path in /auth/connector/google /auth/connector/session /auth/connector /auth/connector/session/; do
+            check 8091 "$path" ""
+            check 8091 "/api$path" ""
+            check 8092 "$path" ""
+            check 8092 "/api$path" 403
+            check 8093 "$path" 404
+            check 8093 "/api$path" 404
           done
 
       - name: Verify served security headers

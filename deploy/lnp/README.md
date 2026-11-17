@@ -6,7 +6,7 @@ This fork of [ysalitrynskyi/opn.onl](https://github.com/ysalitrynskyi/opn.onl) r
 |---|---|---|
 | `ldr.now` | `frontend-public` (127.0.0.1:3101) | Public: short-link redirects, the password and interstitial pages, and the Secure View viewer |
 | `links.leadershipnowproject.com` | `frontend-admin` (127.0.0.1:3102) | Sign in with Google on the login page; `leadershipnowproject.com` and `.org` accounts only |
-| `links-mcp.leadershipnowproject.com` | `mcp` (127.0.0.1:3104) | Cloudflare Access with Managed OAuth: the Claude connector |
+| `links-mcp.leadershipnowproject.com` | `mcp` (127.0.0.1:3104) | The Claude connector. It signs people in itself (OAuth 2.1, then Google); `leadershipnowproject.com` and `.org` accounts only |
 
 Each hostname proxies its own `/api/` to the single backend, so browser calls are always same-origin. On `ldr.now` only the redirect, verify and preview routes and the Secure View viewer's two calls pass; the rest of `/api/` is 404 and dashboard pages redirect to the admin host.
 
@@ -15,8 +15,9 @@ Each hostname proxies its own `/api/` to the single backend, so browser calls ar
 Kept small so they carry across upstream releases:
 
 - `backend/src/handlers/google_auth.rs` (new): `POST /auth/google` signs in a Google account from an allowed email domain. The login page sends the one-time code from Google's popup; the backend redeems it and checks the ID token. Off unless `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_ALLOWED_DOMAINS` are set. `GET /auth/settings` then carries `google_client_id`.
-- `backend/src/handlers/cf_access.rs` (new): `POST /auth/cf-access` signs in the person Cloudflare Access authenticated, from the `Cf-Access-Jwt-Assertion` header. Off unless `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set. Only the Claude connector uses it now.
-- `backend/src/handlers/verified_sign_in.rs` (new): what both of those do once the address is verified (find the account or create it, first account is admin), so they cannot drift. All three are registered in `handlers/mod.rs`, `lib.rs` and `openapi.rs`; `FIRST_ACCOUNT_ADMIN_LOCK` in `auth.rs` is `pub(crate)` so every sign-up path shares it.
+- `backend/src/handlers/cf_access.rs` (new): `POST /auth/cf-access` signs in the person Cloudflare Access authenticated, from the `Cf-Access-Jwt-Assertion` header. Off unless `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set. This deployment no longer sets them, so it is off here.
+- `backend/src/handlers/connector_auth.rs` (new): the Claude connector's sign-in (below, "Claude connector"). `POST /auth/connector/google` takes the Google ID token the connector received and checks it with the same function as `/auth/google`; `POST /auth/connector/session` renews that session for the connector, against an assertion signed with `CONNECTOR_SIGNIN_SECRET`, while the account is still live and unchanged. Off unless Google sign-in is configured.
+- `backend/src/handlers/verified_sign_in.rs` (new): what all of those do once the address is verified (find the account or create it, first account is admin), so they cannot drift. All are registered in `handlers/mod.rs`, `lib.rs` and `openapi.rs`; `FIRST_ACCOUNT_ADMIN_LOCK` in `auth.rs` is `pub(crate)` so every sign-up path shares it.
 - `backend/src/handlers/default_org.rs` (new): the shared organization (below, "Shared links"). `verified_sign_in.rs` calls it after every sign-in; `links.rs`, `folders.rs` and `tags.rs` ask it which organization stands in for a member's personal scope when a request names none; and `GET /auth/settings` carries `default_org`. `GET /links` and `GET /links/export` take `mine=true`, and an organization's list names each link's creator (`created_by`) and says whether the caller may delete it (`can_delete`). Off unless `DEFAULT_ORG_NAME` and `DEFAULT_ORG_SLUG` are set.
 - `frontend/src/pages/Login.tsx`: when the settings carry `google_client_id`, the page shows "Sign in with Google" in place of the password form. `frontend/src/config/api.ts` names the endpoint.
 - `frontend/src/pages/Dashboard.tsx` and `src/components/dashboard/LinkViewToggle.tsx` (new): when the settings carry `default_org` and the account is a member, the dashboard works in that organization and offers "My Links" / "All LNP Links".
@@ -26,7 +27,7 @@ Kept small so they carry across upstream releases:
 - Secure View (below, "Secure View"): `backend/src/utils/secure_view.rs` (the ticket and view token, the protected copy of a PDF, where the viewer's bytes come from), `backend/src/handlers/secure_view.rs` (`PUT /links/{id}/secure-view`, `POST /{code}/view`, `GET /{code}/view/file`), two columns on `link_files`, `click_events.viewer_email`, and `get`/`put` on the `FileStore` trait. `GET /{code}` sends a Secure View link to the viewer instead of signing an address. Frontend: `src/pages/SecureView.tsx` and `src/components/viewer/` (the viewer, with PDF.js), `SecureViewSwitch.tsx`, and `VITE_PUBLIC_LINKS_ONLY` in `Layout.tsx`. New dependencies: `lopdf` (backend) and `pdfjs-dist` (frontend). Does nothing unless file sharing is on.
 - Google Drive links (below, "Google Drive picker"): `frontend/src/utils/googleDrive.ts` (the Drive token, Google's picker, the two Drive calls), `DriveFilePanel.tsx` (the "Google Drive Files" button and its confirmation panel) and the Drive row in `LinkRow.tsx`. Backend: `utils/drive.rs`, the `link_drive_files` table, an optional `drive_file` on `POST /links`, `drive` on every link answer, and `drive` in `GET /auth/settings`. A Drive link is an ordinary URL link to the file's address in Drive. `frontend/Dockerfile` takes `CSP_GOOGLE_DRIVE_PICKER`. Off unless `GOOGLE_PICKER_API_KEY` and `GOOGLE_PICKER_APP_ID` are set.
 - Media links (below, "Media pages"): `backend/src/utils/media.rs` (reading a YouTube or Vimeo video out of an address, the player's address, the ticket, the embed check), `backend/src/handlers/media.rs` (`POST /{code}/media`), the `link_media` table, an optional `media` on `POST /links`, `media_cta` on `PUT /links/{id}`, and `media` on every link answer. `GET /{code}` sends a media link to the page instead of the video's host. A media link is an ordinary URL link to the video's own page. Frontend: `CreateMediaTab.tsx`, `MediaCtaFields.tsx`, `src/pages/MediaPage.tsx`, `src/utils/media.ts`, a `media` mode of `DriveFilePanel.tsx`, and the badge in `LinkRow.tsx`. `frontend/Dockerfile` takes `CSP_MEDIA_EMBEDS`. A link to a YouTube or Vimeo video, or into Google Drive, is no longer kept in the Redis redirect cache, media link or not.
-- `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only. `deploy/lnp/mcp/` is the Claude connector (below); it uses the published `opn-mcp` package unchanged.
+- `deploy/lnp/` and `.github/workflows/lnp-images.yml`: deployment only. `deploy/lnp/mcp/` is the Claude connector (below); it uses the published `opn-mcp` package unchanged, and the MCP SDK's own handlers for the OAuth token and registration endpoints.
 
 The first account to sign in becomes the instance admin.
 
@@ -59,13 +60,13 @@ Google Cloud, project `lnp-links`:
 - Credentials: an OAuth 2.0 client ID of type **Web application**, with the authorised JavaScript origin `https://links.leadershipnowproject.com`. No redirect URI is needed (the popup flow uses `postmessage`).
 - Put the client ID and secret in `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
 
-On this host `nginx/admin.conf` refuses every other way to get a session (password sign-in, registration, password reset, passkeys, `/auth/cf-access`).
+On this host `nginx/admin.conf` refuses every other way to get a session (password sign-in, registration, password reset, passkeys, `/auth/cf-access`, and the connector's `/auth/connector/…`).
 
 Moving from Cloudflare Access to Google sign-in, in this order:
 
 1. Deploy the new backend and dashboard images, the new `nginx/admin.conf` and the `GOOGLE_*` settings together, while the Access application still protects the hostname. `admin.conf` goes with the new dashboard image: an older image signs in through `/api/auth/cf-access`, which the new file refuses.
 2. Through Access, open the dashboard and sign in with Google once with a `.com` account and once with a `.org` account. Check each sees its existing links.
-3. Only then remove the Access application from `links.leadershipnowproject.com`. Leave the connector's Access application (`links-mcp.…`) alone, and take the removed application's AUD tag out of `CF_ACCESS_AUD` so only the connector's is left.
+3. Only then remove the Access application from `links.leadershipnowproject.com`. (The connector's Access application has since gone too: see "Claude connector".)
 
 If a staff account is refused in step 2, the backend log says why (`Google sign-in refused: …`), without the address.
 
@@ -248,10 +249,51 @@ Check it with one YouTube video that is public, one whose owner turned embedding
 
 `mcp/server.mjs` serves [opn-mcp](https://github.com/ysalitrynskyi/opn-mcp)'s tools over Streamable HTTP at `https://links-mcp.leadershipnowproject.com/mcp`, so staff add it in Claude under Connectors instead of installing anything.
 
-- Cloudflare Access protects the hostname with **Managed OAuth** on (Additional settings), so Claude can run the sign-in itself. Allowed redirect URIs: Claude's callback (`https://claude.ai/*`, `https://claude.com/*`).
-- Each request reaches the server with Access's `Cf-Access-Jwt-Assertion`. The server passes it to the backend's `/auth/cf-access`, which checks it and returns a session for that person. Tools then act as them, so links land in their own account. **Add the connector's Access AUD tag to `CF_ACCESS_AUD`** (comma-separated) or every sign-in is refused.
 - `delete_link` and `shorten_urls_bulk` are hidden (`HIDDEN_TOOLS`); staff delete in the dashboard.
 - `OPN_MCP_TAG` in `.env` pins its image separately from `OPN_TAG`.
+- Nothing in front of the hostname signs anyone in (no Cloudflare Access). The host's reverse proxy sends it to 127.0.0.1:3104 and must pass Cloudflare's `CF-Connecting-IP` through; the rate limits count by it.
+
+### How sign-in works
+
+The server is its own OAuth 2.1 authorization server (`mcp/oauth.mjs`), which is what Claude's connectors expect of a remote MCP server:
+
+1. Claude calls `/mcp` without a token and gets `401` with `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`. That document and `/.well-known/oauth-authorization-server` tell Claude that this server signs people in.
+2. Claude registers itself at `/register` (a public client, no secret). Only Claude's callback addresses are accepted: `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback` (`MCP_ALLOWED_REDIRECT_URIS`). Anything else, loopback addresses included, is refused, so Claude Code's own direct connection (which returns to `http://localhost:<port>`) does not work; connectors added in Claude do.
+3. Claude sends the person's browser to `/authorize` (PKCE `S256` required). The server sends them on to Google with the dashboard's Google client, and Google sends them back to `/oauth/google/callback`.
+4. The server redeems Google's code and hands the ID token to the backend (`POST /auth/connector/google`, inside the compose network). The backend checks it exactly as the dashboard's sign-in does (Google's signature, this client, verified email, the two domains, a Workspace account) and answers with a session for that person's account, creating the account on first sign-in. Someone it refuses sees a page saying the account is not allowed, and Claude gets no code.
+5. The person returns to Claude with a one-time code (60 seconds), which Claude trades at `/token` for an access token (1 hour) and a refresh token.
+6. Every hour or so Claude refreshes. Each refresh asks the backend for a new session for that person (`POST /auth/connector/session`), which it gives only while the account is live, enabled, on an allowed domain and has not had its sessions ended. So someone who has left is cut off at the next refresh at the latest, and at once for tools: every `/mcp` call first checks the session with the backend.
+7. `MCP_SESSION_HOURS` (default 168, seven days) after the Google sign-in the refresh token stops working and Claude asks the person to connect again. A refresh token works once; using an old one again ends that sign-in.
+
+Nothing is stored: client ids and tokens are sealed with `MCP_OAUTH_SECRET`, so a restart signs nobody out. A restart does drop sign-ins that are half-way through (the person clicks Connect again) and forgets which refresh tokens were already used.
+
+### Settings (`.env`)
+
+| Setting | Meaning |
+|---|---|
+| `MCP_OAUTH_SECRET` | Required. Seals client ids and tokens. `openssl rand -base64 48`. The server does not start without it, or with one shorter than 32 bytes or a sample value. |
+| `CONNECTOR_SIGNIN_SECRET` | Required. Shared by the connector and the backend only: the connector signs each session renewal with it. `openssl rand -base64 48`; not the same value as `MCP_OAUTH_SECRET` or `JWT_SECRET`. Whoever knows it and can reach the backend directly can get a session as any staff account, so it stays in `.env` and the route stays off the internet (below). |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The dashboard's Google client; the connector gets the same values. |
+| `MCP_PUBLIC_URL` | Optional; default `https://links-mcp.leadershipnowproject.com`. The address the server calls itself in everything it hands Claude. Never taken from a request. |
+| `MCP_SESSION_HOURS` | Optional; default 168. How long after the Google sign-in a person must sign in again (1 to 720). |
+| `MCP_ALLOWED_REDIRECT_URIS` | Optional; default Claude's two callbacks. Comma-separated exact `https` addresses; no wildcards, no loopback. |
+
+Google Cloud, project `lnp-links`: on the dashboard's OAuth client (Credentials), add the **authorised redirect URI** `https://links-mcp.leadershipnowproject.com/oauth/google/callback`. Nothing else changes there.
+
+`nginx/admin.conf` and `nginx/public.conf` refuse `/api/auth/connector/…`, so the two sign-in routes are reachable only from the connector, over the compose network. CI replays both files against a running nginx (`ci.yml`, "Connector sign-in routes are not reachable from the public hosts").
+
+### Deploying this change
+
+1. In Google Cloud, add the redirect URI above.
+2. In `.env`: add `MCP_OAUTH_SECRET` and `CONNECTOR_SIGNIN_SECRET` (two different values), set the new image tag, and delete `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`.
+3. Copy the new `docker-compose.yml` and `nginx/` to the server, then `docker compose pull && docker compose up -d` (this restarts the backend, both frontends and the connector).
+4. Check `curl -si -X POST https://links-mcp.leadershipnowproject.com/mcp` answers `401` with the `WWW-Authenticate` header, and `curl -s -o /dev/null -w '%{http_code}' -X POST https://links.leadershipnowproject.com/api/auth/connector/session` answers `403`.
+5. In Claude, each person opens Settings, Connectors, LNP Links and connects once more (the old connection was made through Cloudflare Access and no longer works). If Claude does not offer to reconnect, remove the connector and add `https://links-mcp.leadershipnowproject.com/mcp` again.
+6. Remove the connector's Access application in Cloudflare Zero Trust if it is still there.
+
+To rotate `MCP_OAUTH_SECRET`: change it in `.env` and `docker compose up -d mcp`. Every client id and token stops working at once and each person connects again, as in step 5. Rotating `CONNECTOR_SIGNIN_SECRET` needs `docker compose up -d backend mcp` and signs nobody out.
+
+If someone cannot connect, `docker compose logs mcp` and the backend log say why (`sign-in refused by backend: 403`, `Connector Google sign-in refused: …`), without the address or any token.
 
 ## Updating from upstream
 
