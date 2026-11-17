@@ -4,7 +4,9 @@
 //   Claude -> /mcp                      401, pointing at the metadata below
 //   Claude -> /.well-known/...          who signs people in (this server)
 //   Claude -> /register                 a public client, for Claude's callback only
-//   person -> /authorize                checked, then sent to Google
+//   person -> /authorize                checked, then a page that asks whether
+//                                       to connect: nothing goes to Google yet
+//   person -> /authorize/continue       (POST, the page's button) sent to Google
 //   Google -> /oauth/google/callback    code -> ID token -> the backend checks
 //                                       it and names the opn.onl account
 //   person -> Claude's callback         with a one-time code
@@ -14,16 +16,17 @@
 // Nothing is stored on disk. Client ids, access tokens and refresh tokens are
 // sealed (AES-256-GCM) with keys derived from MCP_OAUTH_SECRET, so they
 // survive a restart and nobody else can make or read one. Only what must be
-// used once is kept in memory, with an expiry and a size cap: pending Google
-// round trips, authorization codes, spent refresh tokens, ended sign-ins. A
-// restart drops sign-ins that are in flight and forgets which refresh tokens
-// were spent; it does not sign anyone out.
+// used once is kept in memory, with an expiry and a size cap: confirmations
+// already used, pending Google round trips, authorization codes, spent refresh
+// tokens, ended sign-ins. A restart drops sign-ins that are in flight and
+// forgets which refresh tokens were spent; it does not sign anyone out.
 //
 // The /token and /register protocol handling is the MCP SDK's; this file is
 // the policy behind them and the two browser steps.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
+import net from "node:net";
 import express from "express";
 import { clientRegistrationHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/register.js";
 import { tokenHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/token.js";
@@ -32,16 +35,26 @@ import { CustomOAuthError, InvalidGrantError, InvalidTargetError, ServerError } 
 export const ACCESS_TOKEN_SECONDS = 3600;
 export const CODE_SECONDS = 60;
 export const PENDING_SECONDS = 600;
+// A client whose answer was lost sends the same request again. For this long
+// after a code or a refresh token was used, the same request from the same
+// client is refused without ending the sign-in the first one made.
+export const CODE_RETRY_SECONDS = 10;
+export const REFRESH_RETRY_SECONDS = 10;
 /** The `aud` of a renewal assertion; the backend accepts no other. */
 export const ASSERTION_AUDIENCE = "opn-connector-session";
 const ASSERTION_SECONDS = 30;
 const UPSTREAM_TIMEOUT_MS = 8000;
 const SIGNIN_COOKIE = "__Host-lnp_mcp_signin";
 const MAX_TOKEN_CHARS = 4096;
+// The forms this server reads (/token, the confirmation page's) are small.
+const FORM_BYTES = 16 * 1024;
 
-// How many entries each in-memory map may hold. A full map refuses new
-// entries (after dropping expired ones) rather than growing.
+// How many entries each in-memory map may hold. None grows past its cap. What
+// is only in flight (`usedConfirmations`, `pending`) and the rate counters
+// drop their oldest entry to make room, so a flood cannot lock anyone out;
+// the others refuse the new entry, and each caller says what that means.
 export const LIMITS = {
+  usedConfirmations: 2000,
   pending: 2000,
   codes: 1000,
   spentCodes: 2000,
@@ -50,15 +63,26 @@ export const LIMITS = {
   rateKeys: 10000,
 };
 
-// Requests per window, per client address. /register and /token are called by
-// Anthropic's servers, a few addresses shared by everyone, so they are roomy;
-// /authorize and the Google callback are one person's browser.
+// Requests per window, per network (`rateKey`). /register, /token and /mcp are
+// called by Anthropic's servers, a few addresses shared by everyone, so they
+// are roomy; /authorize, its confirmation and the Google callback are one
+// person's browser.
 export const RATE_LIMITS = {
   register: { max: 60, windowSeconds: 3600 },
   authorize: { max: 30, windowSeconds: 600 },
+  confirm: { max: 30, windowSeconds: 600 },
   callback: { max: 30, windowSeconds: 600 },
+  // /token requests that carry a code or refresh token this server issued.
   token: { max: 300, windowSeconds: 600 },
+  // Every other /token request. Counted apart, so that junk, whoever sends it
+  // and from wherever, never uses up what real refreshes need.
+  tokenJunk: { max: 60, windowSeconds: 600 },
+  // /mcp requests without a valid access token. Valid ones are not counted.
+  mcpUnauthenticated: { max: 300, windowSeconds: 600 },
 };
+// Callers whose address cannot be read share one key and a tenth of the budget.
+export const UNKNOWN_ADDRESS = "unknown";
+const UNKNOWN_BUDGET_DIVISOR = 10;
 
 // --- small tools ------------------------------------------------------------
 
@@ -77,15 +101,20 @@ function one(v) {
   return typeof v === "string" ? v : undefined;
 }
 
-function escapeHtml(text) {
+export function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
-/** A map whose entries expire, and which never holds more than `max`. */
+/**
+ * A map whose entries expire, and which never holds more than `max`. When it
+ * is full of live entries it refuses a new one, or, with `evictOldest`, drops
+ * the entry that was added first to make room.
+ */
 export class ExpiringMap {
-  constructor(max, now) {
+  constructor(max, now, { evictOldest = false } = {}) {
     this.max = max;
     this.now = now;
+    this.evictOldest = evictOldest;
     this.map = new Map();
   }
   sweep() {
@@ -95,8 +124,14 @@ export class ExpiringMap {
   /** False when the map is full of live entries: the caller must refuse. */
   set(key, value, expiresAt) {
     if (!this.map.has(key) && this.map.size >= this.max) {
-      this.sweep();
-      if (this.map.size >= this.max) return false;
+      if (this.evictOldest) {
+        // No sweep: under a flood that would be a scan of the whole map per
+        // request. A Map lists its keys in the order they were added.
+        this.map.delete(this.map.keys().next().value);
+      } else {
+        this.sweep();
+        if (this.map.size >= this.max) return false;
+      }
     }
     this.map.set(key, { value, expiresAt });
     return true;
@@ -124,24 +159,25 @@ export class ExpiringMap {
   }
 }
 
-/** Fixed-window request counter per key, in a bounded map. */
+/**
+ * Fixed-window request counter per key, in a bounded map. When the map is
+ * full the oldest counter goes to make room. Losing a counter only ever gives
+ * its owner a fresh budget, so no number of other callers can get anyone
+ * refused; there is no counter that strangers share.
+ */
 export class RateLimiter {
   constructor(now, maxKeys = LIMITS.rateKeys) {
-    this.windows = new ExpiringMap(maxKeys, now);
+    this.windows = new ExpiringMap(maxKeys, now, { evictOldest: true });
     this.now = now;
   }
   /** Seconds to wait, or 0 when the request may go ahead. */
-  check(bucket, address, { max, windowSeconds }) {
-    let key = `${bucket}:${address}`;
-    let window = this.windows.get(key);
+  check(bucket, key, { max, windowSeconds }) {
+    if (key === UNKNOWN_ADDRESS) max = Math.max(1, Math.floor(max / UNKNOWN_BUDGET_DIVISOR));
+    const id = `${bucket}:${key}`;
+    let window = this.windows.get(id);
     if (!window) {
       window = { count: 0, resetAt: this.now() + windowSeconds * 1000 };
-      // No room for another address: the strangers share one counter.
-      if (!this.windows.set(key, window, window.resetAt)) {
-        key = `${bucket}:overflow`;
-        window = this.windows.get(key) ?? window;
-        this.windows.map.set(key, { value: window, expiresAt: window.resetAt });
-      }
+      this.windows.set(id, window, window.resetAt);
     }
     window.count += 1;
     return window.count > max ? Math.max(1, Math.ceil((window.resetAt - this.now()) / 1000)) : 0;
@@ -151,8 +187,40 @@ export class RateLimiter {
 /** The caller's address: Cloudflare's header in production, else the socket's. */
 export function clientAddress(req) {
   const header = req.headers["cf-connecting-ip"];
-  if (typeof header === "string" && header.length > 0 && header.length <= 64) return header;
-  return req.socket?.remoteAddress ?? "unknown";
+  if (header !== undefined) return typeof header === "string" && header.length <= 64 ? header : UNKNOWN_ADDRESS;
+  return req.socket?.remoteAddress ?? UNKNOWN_ADDRESS;
+}
+
+/**
+ * What an address is rate limited as, the backend's `rate_limit_bucket`
+ * (`backend/src/utils/rate_limiter.rs`) in JavaScript: an IPv4 address is
+ * itself, an IPv6 address is its /64 (one subscriber usually holds a whole
+ * /64, so the full address would be as many identities as they like), an
+ * IPv4-mapped IPv6 address is the IPv4 address, and anything else is the one
+ * shared "unknown".
+ */
+export function rateKey(address) {
+  if (typeof address !== "string") return UNKNOWN_ADDRESS;
+  if (net.isIPv4(address)) return address;
+  if (!net.isIPv6(address)) return UNKNOWN_ADDRESS;
+  let text = address.split("%")[0];
+  if (text.includes(".")) {
+    // A dotted tail (::ffff:192.0.2.1) is the last two groups.
+    const cut = text.lastIndexOf(":") + 1;
+    const [a, b, c, d] = text.slice(cut).split(".").map(Number);
+    text = `${text.slice(0, cut)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, tail] = text.split("::");
+  const before = head ? head.split(":") : [];
+  const after = tail ? tail.split(":") : [];
+  const groups = [...before, ...Array(8 - before.length - after.length).fill("0"), ...after].map((group) => parseInt(group, 16));
+  if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
+    return `${groups[6] >> 8}.${groups[6] & 255}.${groups[7] >> 8}.${groups[7] & 255}`;
+  }
+  return `${groups
+    .slice(0, 4)
+    .map((group) => group.toString(16))
+    .join(":")}::`;
 }
 
 // The backend sits behind TLS-terminating proxies: without X-Forwarded-Proto it
@@ -170,7 +238,7 @@ export function proxyHeaders(req) {
 // One key per kind of value, and the kind is authenticated too, so a refresh
 // token is never accepted as an access token or a client id. The trailing
 // number is the format's version.
-const KINDS = { client: "lnpc1", access: "lnpa1", refresh: "lnpr1" };
+const KINDS = { client: "lnpc1", access: "lnpa1", refresh: "lnpr1", confirm: "lnpq1" };
 
 export class Sealer {
   constructor(secret) {
@@ -224,7 +292,8 @@ export function signAssertion(secret, userId, tokenVersion, nowMs) {
 
 // --- pages ----------------------------------------------------------------------
 
-function sendPage(res, status, title, message, link) {
+/** Every page this server shows: no outside assets, no script, never in a frame. */
+function sendHtml(res, status, title, bodyHtml) {
   res
     .status(status)
     .set({
@@ -238,11 +307,41 @@ function sendPage(res, status, title, message, link) {
     .send(
       `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">` +
         `<meta name="robots" content="noindex"><title>${escapeHtml(title)}</title>` +
-        `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#1f2937}h1{font-size:1.25rem}</style></head>` +
-        `<body><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>` +
-        (link ? `<p><a href="${escapeHtml(link.href)}" rel="noreferrer">${escapeHtml(link.text)}</a></p>` : "") +
-        `</body></html>`,
+        `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#1f2937}h1{font-size:1.25rem}` +
+        `button{font:inherit;padding:.5rem 1rem;margin:0 .5rem .5rem 0;border:1px solid #1f2937;border-radius:.375rem;background:#fff;color:#1f2937;cursor:pointer}` +
+        `button.go{background:#1f2937;color:#fff}</style></head>` +
+        `<body><h1>${escapeHtml(title)}</h1>${bodyHtml}</body></html>`,
     );
+}
+
+function sendPage(res, status, title, message, link) {
+  sendHtml(
+    res,
+    status,
+    title,
+    `<p>${escapeHtml(message)}</p>` + (link ? `<p><a href="${escapeHtml(link.href)}" rel="noreferrer">${escapeHtml(link.text)}</a></p>` : ""),
+  );
+}
+
+// The page between Claude's link and Google. Its text is fixed: nothing from
+// the request is shown, and the request itself travels in the sealed token.
+export const CONFIRM_TITLE = "Connect Claude to LNP Links?";
+export const CONFIRM_TEXT = [
+  "Claude is asking to use LNP Links as you: to create and change short links, and to see their statistics.",
+  "Continue only if you yourself just clicked Connect for LNP Links in Claude.",
+  "If someone sent you this link, close this page.",
+];
+
+function sendConfirmPage(res, token) {
+  sendHtml(
+    res,
+    200,
+    CONFIRM_TITLE,
+    CONFIRM_TEXT.map((line) => `<p>${escapeHtml(line)}</p>`).join("") +
+      `<form method="post" action="/authorize/continue"><input type="hidden" name="confirmation" value="${escapeHtml(token)}">` +
+      `<button class="go" type="submit" name="choice" value="continue">Continue with Google</button>` +
+      `<button type="submit" name="choice" value="cancel">Cancel</button></form>`,
+  );
 }
 
 function redirect(res, url) {
@@ -252,17 +351,35 @@ function redirect(res, url) {
 // --- the authorization server -----------------------------------------------------
 
 export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimits = RATE_LIMITS } = {}) {
+  // A caller (a test) that changes one limit keeps the others.
+  limits = { ...LIMITS, ...limits };
+  rateLimits = { ...RATE_LIMITS, ...rateLimits };
   const sealer = new Sealer(config.oauthSecret);
   const limiter = new RateLimiter(now, limits.rateKeys);
+  // What each map does when it is full is part of its job:
+  //
+  // Ids of confirmation tokens that were used. Full: the oldest goes. A
+  // forgotten id lets the browser that holds the token and its cookie press
+  // the button twice, which starts a second Google round trip in that same
+  // browser and nothing more.
+  const usedConfirmations = new ExpiringMap(limits.usedConfirmations, now, { evictOldest: true });
   // Google `state` -> the authorization request waiting for that round trip.
-  const pending = new ExpiringMap(limits.pending, now);
-  // Authorization code -> the sign-in it stands for.
+  // Full: the oldest goes, so a flood can only make someone in the middle of
+  // signing in click Connect again; it cannot keep new sign-ins out.
+  const pending = new ExpiringMap(limits.pending, now, { evictOldest: true });
+  // Authorization code -> the sign-in it stands for. Only a finished Google
+  // sign-in of an allowed account adds one, for a minute. Full: the newcomer
+  // gets a "busy" page; a code already handed to Claude is never dropped.
   const codes = new ExpiringMap(limits.codes, now);
   // A code that was already redeemed -> its sign-in, to end it on a replay.
+  // Full: the code is still single-use (it left `codes`), but a replay of it
+  // is merely refused and no longer ends the sign-in.
   const spentCodes = new ExpiringMap(limits.spentCodes, now);
-  // Ids of refresh tokens that were rotated away.
+  // Id of a refresh token that was rotated away -> when. Full: the refresh is
+  // refused (500) and its token stays good, so nothing is ever forgotten.
   const spentRefreshTokens = new ExpiringMap(limits.spentRefreshTokens, now);
   // Sign-ins ended early (a replay, or the backend said the person is gone).
+  // Full: see endSignIn.
   const endedSignIns = new ExpiringMap(limits.endedSignIns, now);
 
   // The headers the backend needs from the request being answered; the SDK's
@@ -270,6 +387,10 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
   const requestHeaders = new AsyncLocalStorage();
 
   const callbackUrl = `${config.issuer}/oauth/google/callback`;
+  // The browser that is shown the confirmation page is the one that must
+  // press its button and the one Google must send back. Lax, not Strict: the
+  // return from Google is a navigation from another site.
+  const signinCookie = (browser) => `${SIGNIN_COOKIE}=${browser}; Path=/; Max-Age=${PENDING_SECONDS}; Secure; HttpOnly; SameSite=Lax`;
   const resourceMetadataUrl = `${config.issuer}/.well-known/oauth-protected-resource/mcp`;
   const clientTag = (clientId) => b64url(sha256(clientId).subarray(0, 16));
 
@@ -287,9 +408,12 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
 
   function endSignIn(sid, sessionEnd) {
     // Only a signed-in person's own replay or removal adds an entry, so the
-    // cap is far away; were it reached, the entry would be dropped and that
-    // sign-in would last until its tokens expire.
-    endedSignIns.set(sid, true, sessionEnd);
+    // cap is far away. Were it reached, this sign-in would not be recorded
+    // as ended: a person the backend has removed is still refused on every
+    // call and every refresh (the backend is asked each time), and a replayed
+    // refresh token is still refused, but the tokens the replay's other
+    // holder has would work until they expire.
+    if (!endedSignIns.set(sid, true, sessionEnd)) console.error("ended sign-ins: the list is full; a sign-in could not be ended early");
   }
 
   // --- clients: the client id is the registration, sealed ---------------------
@@ -363,22 +487,34 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
 
     async exchangeAuthorizationCode(client, code, codeVerifier, redirectUri, resource) {
       const refused = () => new InvalidGrantError("The authorization code is invalid, expired or already used");
+      const verifierFits = (challenge) =>
+        typeof codeVerifier === "string" && /^[A-Za-z0-9\-._~]{43,128}$/.test(codeVerifier) && safeEqual(b64url(sha256(codeVerifier)), challenge);
       const grant = codes.take(code);
       if (!grant) {
         // A code presented twice: whoever holds the tokens it produced may
-        // not be the person, so that sign-in ends.
+        // not be the person, so that sign-in ends. Unless it is the same
+        // client sending its request again within a few seconds (its PKCE
+        // verifier proves it is the same one): that is refused too, but the
+        // sign-in its first request made stays.
         const replayed = spentCodes.get(code);
-        if (replayed) endSignIn(replayed.sid, replayed.sessionEnd);
+        if (replayed) {
+          const sameClientAgain =
+            now() - replayed.at <= CODE_RETRY_SECONDS * 1000 && safeEqual(replayed.clientId, client.client_id) && verifierFits(replayed.codeChallenge);
+          if (!sameClientAgain) endSignIn(replayed.sid, replayed.sessionEnd);
+        }
         throw refused();
       }
-      spentCodes.set(code, { sid: grant.sid, sessionEnd: grant.sessionEnd }, now() + PENDING_SECONDS * 1000);
+      spentCodes.set(
+        code,
+        { sid: grant.sid, sessionEnd: grant.sessionEnd, clientId: grant.clientId, codeChallenge: grant.codeChallenge, at: now() },
+        now() + PENDING_SECONDS * 1000,
+      );
 
       if (!safeEqual(grant.clientId, client.client_id)) throw refused();
       // OAuth 2.1 no longer sends redirect_uri here (PKCE does that job); a
       // client that does send it must send the one the code was issued to.
       if (redirectUri !== undefined && !safeEqual(redirectUri, grant.redirectUri)) throw refused();
-      if (typeof codeVerifier !== "string" || !/^[A-Za-z0-9\-._~]{43,128}$/.test(codeVerifier)) throw refused();
-      if (!safeEqual(b64url(sha256(codeVerifier)), grant.codeChallenge)) throw refused();
+      if (!verifierFits(grant.codeChallenge)) throw refused();
       if (resource !== undefined && !isThisResource(resource.href)) {
         throw new InvalidTargetError("This server issues tokens for its own /mcp only");
       }
@@ -398,7 +534,17 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
         endSignIn(p.s, p.x);
         return refused();
       };
-      if (spentRefreshTokens.has(p.j)) throw reuse();
+      // A refresh token used again: whoever holds what it produced may not
+      // be the person, so the sign-in ends. Unless it was rotated only
+      // seconds ago: that is the client sending its request again, which is
+      // refused and nothing more.
+      const usedAgain = () => {
+        const rotatedAt = spentRefreshTokens.get(p.j);
+        if (rotatedAt === undefined) return undefined;
+        return now() - rotatedAt <= REFRESH_RETRY_SECONDS * 1000 ? refused() : reuse();
+      };
+      let again = usedAgain();
+      if (again) throw again;
       if (resource !== undefined && !isThisResource(resource.href)) {
         throw new InvalidTargetError("This server issues tokens for its own /mcp only");
       }
@@ -432,16 +578,21 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
 
       // Checked again: the same token may have been redeemed while the
       // backend was answering. Nothing awaits between this and the mark.
-      if (spentRefreshTokens.has(p.j) || endedSignIns.has(p.s)) throw reuse();
-      if (!spentRefreshTokens.set(p.j, true, p.x)) throw new ServerError("The sign-in could not be renewed right now");
+      again = usedAgain();
+      if (again) throw again;
+      if (endedSignIns.has(p.s)) throw refused();
+      if (!spentRefreshTokens.set(p.j, now(), p.x)) throw new ServerError("The sign-in could not be renewed right now");
       return mint({ sid: p.s, userId: p.u, clientTag: p.c, sessionEnd: p.x, tokenVersion: session.token_version }, session.token);
     },
   };
 
   // --- routes -------------------------------------------------------------------
 
+  /** Seconds this caller must wait before another request in `bucket`, or 0. */
+  const waitFor = (bucket, req) => limiter.check(bucket, rateKey(clientAddress(req)), rateLimits[bucket]);
+  // `bucket` is a name, or a function that picks one for the request.
   const limit = (bucket, onLimited) => (req, res, next) => {
-    const wait = limiter.check(bucket, clientAddress(req), rateLimits[bucket]);
+    const wait = waitFor(typeof bucket === "function" ? bucket(req) : bucket, req);
     if (wait === 0) return next();
     res.set("Retry-After", String(wait));
     onLimited(res);
@@ -479,9 +630,24 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
   );
 
   router.use("/register", limit("register", jsonLimited), clientRegistrationHandler({ clientsStore, rateLimit: false }));
+  // Only a request that carries a code or a refresh token of this server's
+  // own making counts against the budget real requests need. The form is
+  // read here for that (the SDK's handler then finds it already read).
+  const tokenBucket = (req) => {
+    const form = req.body ?? {};
+    if (form.grant_type === "refresh_token") return sealer.unseal("refresh", form.refresh_token) ? "token" : "tokenJunk";
+    if (form.grant_type === "authorization_code" && typeof form.code === "string") return codes.has(form.code) || spentCodes.has(form.code) ? "token" : "tokenJunk";
+    return "tokenJunk";
+  };
   router.use(
     "/token",
-    limit("token", jsonLimited),
+    (_req, res, next) => {
+      // For HTTP/1.0 caches, as OAuth asks of token responses.
+      res.set("Pragma", "no-cache");
+      next();
+    },
+    express.urlencoded({ extended: false, limit: FORM_BYTES }),
+    limit(tokenBucket, jsonLimited),
     (req, _res, next) => requestHeaders.run(proxyHeaders(req), next),
     tokenHandler({ provider, rateLimit: false }),
   );
@@ -524,15 +690,59 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
       return fail("invalid_target", "This server issues tokens for its own /mcp only");
     }
 
-    // The browser that starts a sign-in is the one that must finish it.
+    // Nothing goes to Google yet. Whoever opened this link (it may have been
+    // sent to them by someone who started the connection in their own Claude)
+    // is first asked whether they meant to connect. The checked request rides
+    // in a sealed token in the page's form, bound to this browser's cookie,
+    // so nothing is kept here for a request nobody has confirmed.
     const cookies = parseCookies(req);
     const browser = /^[A-Za-z0-9_-]{43}$/.test(cookies[SIGNIN_COOKIE] ?? "") ? cookies[SIGNIN_COOKIE] : randomId();
+    const token = sealer.seal("confirm", {
+      i: randomId(),
+      c: clientId,
+      r: redirectUri,
+      s: state,
+      k: codeChallenge,
+      a: config.resource,
+      b: b64url(sha256(browser)),
+      e: now() + PENDING_SECONDS * 1000,
+    });
+    if (token.length > MAX_TOKEN_CHARS) return fail("invalid_request", "state is too long");
+    res.append("Set-Cookie", signinCookie(browser));
+    sendConfirmPage(res, token);
+  });
+
+  // The button on that page. Only this, a POST that brings both the page's
+  // token and the cookie of the browser the page was shown to, starts a Google
+  // round trip. The cookie is SameSite=Lax, which a form on another site does
+  // not get sent with its POST.
+  router.all("/authorize/continue", limit("confirm", pageLimited), express.urlencoded({ extended: false, limit: FORM_BYTES }), (req, res) => {
+    if (req.method !== "POST") return res.status(405).set("Allow", "POST").end();
+    const stale = () => sendPage(res, 400, "This sign-in has expired", "It was already used, or took longer than ten minutes. Go back to Claude and connect LNP Links again.");
+
+    // The request is the one sealed into the token at /authorize; nothing
+    // else the form says is believed.
+    const request = sealer.unseal("confirm", one(req.body?.confirmation));
+    if (!request || typeof request.i !== "string" || request.a !== config.resource || !(request.e > now())) return stale();
+    const browser = parseCookies(req)[SIGNIN_COOKIE];
+    if (typeof browser !== "string" || !safeEqual(b64url(sha256(browser)), request.b)) return stale();
+    const client = clientsStore.getClient(request.c);
+    if (!client || !client.redirect_uris.includes(request.r)) return stale();
+    // Used once, whichever button it was.
+    if (usedConfirmations.has(request.i)) return stale();
+    usedConfirmations.set(request.i, true, request.e);
+
+    if (one(req.body.choice) !== "continue") {
+      return redirect(res, redirectError(res, request.r, request.s, "access_denied", "The connection was cancelled"));
+    }
+
     const googleState = randomId();
     const nonce = randomId();
-    const expiresAt = now() + PENDING_SECONDS * 1000;
-    if (!pending.set(googleState, { clientId, redirectUri, state, codeChallenge, nonce, browser: b64url(sha256(browser)) }, expiresAt)) {
-      return fail("temporarily_unavailable", "Too many sign-ins are in progress; try again in a few minutes");
-    }
+    pending.set(
+      googleState,
+      { clientId: request.c, redirectUri: request.r, state: request.s, codeChallenge: request.k, nonce, browser: request.b },
+      now() + PENDING_SECONDS * 1000,
+    );
 
     const google = new URL(config.googleAuthUrl);
     google.searchParams.set("client_id", config.googleClientId);
@@ -542,7 +752,8 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
     google.searchParams.set("state", googleState);
     google.searchParams.set("nonce", nonce);
     google.searchParams.set("prompt", "select_account");
-    res.append("Set-Cookie", `${SIGNIN_COOKIE}=${browser}; Path=/; Max-Age=${PENDING_SECONDS}; Secure; HttpOnly; SameSite=Lax`);
+    // Again, so that it lasts as long as the round trip may.
+    res.append("Set-Cookie", signinCookie(browser));
     redirect(res, google.href);
   });
 
@@ -673,8 +884,10 @@ export function createOAuth(config, { now = Date.now, limits = LIMITS, rateLimit
     authenticate,
     challenge,
     endSignIn,
+    /** Seconds a caller whose /mcp request carried no valid token must wait, or 0. */
+    unauthenticatedWait: (req) => waitFor("mcpUnauthenticated", req),
     // For tests.
-    internals: { clientTag, sealer, pending, codes, spentCodes, spentRefreshTokens, endedSignIns, limiter, mint, verifyAccessToken, clientsStore, provider },
+    internals: { clientTag, sealer, usedConfirmations, pending, codes, spentCodes, spentRefreshTokens, endedSignIns, limiter, mint, verifyAccessToken, clientsStore, provider },
   };
 }
 

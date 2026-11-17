@@ -252,6 +252,7 @@ Check it with one YouTube video that is public, one whose owner turned embedding
 - `delete_link` and `shorten_urls_bulk` are hidden (`HIDDEN_TOOLS`); staff delete in the dashboard.
 - `OPN_MCP_TAG` in `.env` pins its image separately from `OPN_TAG`.
 - Nothing in front of the hostname signs anyone in (no Cloudflare Access). The host's reverse proxy sends it to 127.0.0.1:3104 and must pass Cloudflare's `CF-Connecting-IP` through; the rate limits count by it.
+- **The connector must only be reachable through Cloudflare.** It believes `CF-Connecting-IP` as it arrives, and passes it on to the backend. Here that is safe because the server's security group allows ports 80 and 443 from Cloudflare's address ranges only, so nobody can reach the connector directly and write the header themselves. A deployment without that rule needs its own arrangement (a proxy in front that removes or overwrites the header), or anyone can pick the address they are rate limited as.
 
 ### How sign-in works
 
@@ -259,13 +260,47 @@ The server is its own OAuth 2.1 authorization server (`mcp/oauth.mjs`), which is
 
 1. Claude calls `/mcp` without a token and gets `401` with `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`. That document and `/.well-known/oauth-authorization-server` tell Claude that this server signs people in.
 2. Claude registers itself at `/register` (a public client, no secret). Only Claude's callback addresses are accepted: `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback` (`MCP_ALLOWED_REDIRECT_URIS`). Anything else, loopback addresses included, is refused, so Claude Code's own direct connection (which returns to `http://localhost:<port>`) does not work; connectors added in Claude do.
-3. Claude sends the person's browser to `/authorize` (PKCE `S256` required). The server sends them on to Google with the dashboard's Google client, and Google sends them back to `/oauth/google/callback`.
+3. Claude sends the person's browser to `/authorize` (PKCE `S256` required). The server checks the request and shows a page of its own, "Connect Claude to LNP Links?", before anything goes to Google (below, "The confirmation page"). Only "Continue with Google" on that page (`POST /authorize/continue`) sends the person on to Google with the dashboard's Google client, and Google sends them back to `/oauth/google/callback`.
 4. The server redeems Google's code and hands the ID token to the backend (`POST /auth/connector/google`, inside the compose network). The backend checks it exactly as the dashboard's sign-in does (Google's signature, this client, verified email, the two domains, a Workspace account) and answers with a session for that person's account, creating the account on first sign-in. Someone it refuses sees a page saying the account is not allowed, and Claude gets no code.
 5. The person returns to Claude with a one-time code (60 seconds), which Claude trades at `/token` for an access token (1 hour) and a refresh token.
 6. Every hour or so Claude refreshes. Each refresh asks the backend for a new session for that person (`POST /auth/connector/session`), which it gives only while the account is live, enabled, on an allowed domain and has not had its sessions ended. So someone who has left is cut off at the next refresh at the latest, and at once for tools: every `/mcp` call first checks the session with the backend.
-7. `MCP_SESSION_HOURS` (default 168, seven days) after the Google sign-in the refresh token stops working and Claude asks the person to connect again. A refresh token works once; using an old one again ends that sign-in.
+7. `MCP_SESSION_HOURS` (default 168, seven days) after the Google sign-in the refresh token stops working and Claude asks the person to connect again. A refresh token works once; using an old one again ends that sign-in (but see "A request sent twice").
 
 Nothing is stored: client ids and tokens are sealed with `MCP_OAUTH_SECRET`, so a restart signs nobody out. A restart does drop sign-ins that are half-way through (the person clicks Connect again) and forgets which refresh tokens were already used.
+
+### The confirmation page
+
+Someone outside LNP can start a connection in their own Claude account, copy the `/authorize` link Claude opens, and send it to a member of staff. Without a page of our own, that person would see only Google's familiar account chooser, and by choosing their account could connect the outsider's Claude to their LNP Links. So `/authorize` never redirects to Google. It shows:
+
+> **Connect Claude to LNP Links?**
+>
+> Claude is asking to use LNP Links as you: to create and change short links, and to see their statistics.
+>
+> Continue only if you yourself just clicked Connect for LNP Links in Claude.
+>
+> If someone sent you this link, close this page.
+>
+> [Continue with Google] [Cancel]
+
+- The page shows nothing from the request, loads nothing from anywhere else, and cannot be put in a frame (`frame-ancestors 'none'`, `X-Frame-Options: DENY`), so the button cannot be clicked for someone.
+- The two buttons are one form that posts to `/authorize/continue`. It carries the checked request sealed in a token (ten minutes, one use) that only works together with the cookie set when the page was shown, so only the browser that saw the page can press the button, and a form on another site cannot (the cookie is `SameSite=Lax`). A `GET` never reaches Google.
+- Cancel sends the person back to Claude with `error=access_denied`.
+- Nothing but a rate counter is kept in memory for a link that was merely opened.
+
+### A request sent twice
+
+Codes and refresh tokens work once. Using one a second time normally ends the sign-in it belongs to, because a second holder may be a thief. A client that sends the same request twice (a retry, or two at the same moment) used to sign the person out that way. So:
+
+- An authorization code presented again within 10 seconds by the same client with the same, correct PKCE verifier is refused (`invalid_grant`) and nothing else happens. With another or no verifier, from another client, or later, it ends the sign-in as before.
+- A refresh token presented again within 10 seconds of being rotated is refused (`invalid_grant`) and nothing else happens. Later, it ends the sign-in as before.
+
+The second request never gets tokens either way. What is given up: a stolen refresh token (or a stolen code together with its PKCE verifier) that is used within 10 seconds of the real client's own use is refused without ending the sign-in, so in that window whoever came first keeps what they got and the theft goes unnoticed. Outside it, nothing has changed.
+
+### Limits
+
+Requests are counted per caller: an IPv4 address, or the /64 of an IPv6 address (as the backend does), from `CF-Connecting-IP`. Callers with no readable address share one counter with a tenth of the budget. Per 10 minutes: `/authorize` 30, its button 30, the Google callback 30, `/token` 300 for requests that carry a code or refresh token of this server's making and 60 for anything else, `/mcp` without a valid token 300 (calls with one are not counted); `/register` 60 an hour.
+
+Nothing in memory grows without bound, and nobody can be locked out by other callers: the table of counters (10,000) and the lists of sign-ins in flight (2,000 each) drop their oldest entry when full. A flood can therefore make someone who is half-way through signing in click Connect again, and no more. Junk sent to `/token`, from any address, never uses up the budget real refreshes have. The lists that security rests on do not forget: a full list of used refresh tokens (20,000) refuses the refresh and leaves its token good.
 
 ### Settings (`.env`)
 

@@ -17,7 +17,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::JwkSet};
 use openssl::rsa::Rsa;
 use opn_onl_backend::AppState;
-use opn_onl_backend::entity::users;
+use opn_onl_backend::entity::{blocked_email_domains, users};
 use opn_onl_backend::handlers::connector_auth::{ASSERTION_AUDIENCE, ConnectorAuth};
 use opn_onl_backend::handlers::google_auth::GoogleAuthConfig;
 use opn_onl_backend::handlers::verified_sign_in::sign_in_verified_email;
@@ -586,5 +586,53 @@ async fn an_account_whose_domain_is_no_longer_allowed_is_not_renewed() {
     assert_eq!(status, 403, "{body}");
     assert!(body.get("token").is_none());
     // Control: the app that still allows the domain renews the same assertion.
+    assert_eq!(renew(&server, &assertion).await.0, 200);
+}
+
+#[tokio::test]
+async fn an_account_whose_domain_an_admin_has_blocked_is_not_renewed() {
+    // A domain of this test's own: a block is seen by every test on the
+    // shared database, and `DOMAIN` is everybody's.
+    let domain = format!("conn-{}.opn.dev", uuid::Uuid::new_v4().simple());
+    let mut google = google_config().await;
+    google.allowed_domains = vec![domain.clone()];
+    let connector = ConnectorAuth::new(google, Some(SECRET.into()), None);
+    let (server, db) = common::spawn_real_app_with_connector(connector).await;
+
+    let mut c = claims(&format!("jane@{domain}"));
+    c["hd"] = json!(domain);
+    let (status, body) = google_sign_in(&server, &c).await;
+    assert_eq!(status, 200, "{body}");
+    let assertion = assertion_with(
+        SECRET,
+        assertion_claims(
+            body["user_id"].as_i64().unwrap(),
+            body["token_version"].as_i64().unwrap(),
+        ),
+    );
+    assert_eq!(renew(&server, &assertion).await.0, 200, "control");
+
+    // The row alone, as if the block had gone in without the account being
+    // disabled with it (the admin endpoint does both): the domain is still
+    // on the connector's own list, and the account is live and enabled.
+    let block = blocked_email_domains::ActiveModel {
+        domain: Set(domain.clone()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let account = user(&db, body["user_id"].as_i64().unwrap()).await;
+    assert!(!account.is_disabled() && !account.is_admin);
+
+    let (status, body) = renew(&server, &assertion).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.get("token").is_none());
+
+    // Unblocked, the same person is renewed again.
+    blocked_email_domains::Entity::delete_by_id(block.id)
+        .exec(&db)
+        .await
+        .unwrap();
     assert_eq!(renew(&server, &assertion).await.0, 200);
 }

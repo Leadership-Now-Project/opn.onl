@@ -255,9 +255,13 @@ pub fn verify_assertion(
     .map_err(|e| AssertionError::Invalid(e.to_string()))?
     .claims;
 
-    if claims.exp - claims.iat > ASSERTION_MAX_LIFE_SECS
-        || claims.iat > now + ASSERTION_CLOCK_SKEW_SECS
-    {
+    // Both numbers are the signer's: a difference that does not fit in an i64
+    // is a life longer than any, not one that wraps round to a short one.
+    let life_ok = claims
+        .exp
+        .checked_sub(claims.iat)
+        .is_some_and(|life| life <= ASSERTION_MAX_LIFE_SECS);
+    if !life_ok || claims.iat > now.saturating_add(ASSERTION_CLOCK_SKEW_SECS) {
         return Err(AssertionError::TooLongLived);
     }
     let user_id = claims
@@ -434,6 +438,22 @@ mod tests {
         c["iat"] = json!(now + 3600);
         c["exp"] = json!(now + 3630);
         assert_eq!(verify(c), Err(AssertionError::TooLongLived));
+    }
+
+    #[test]
+    fn a_life_too_long_to_count_is_refused_not_wrapped_round() {
+        let now = chrono::Utc::now().timestamp();
+        // `exp - iat` does not fit in an i64 for any of these.
+        for iat in [i64::MIN, i64::MIN + now, -i64::MAX] {
+            let mut c = claims();
+            c["iat"] = json!(iat);
+            assert_eq!(verify(c), Err(AssertionError::TooLongLived), "iat {iat}");
+        }
+        // The largest clock reading there is does not overflow the skew either.
+        assert_eq!(
+            verify_assertion(&sign(claims(), SECRET), SECRET, i64::MAX),
+            Ok((42, 3))
+        );
     }
 
     #[test]

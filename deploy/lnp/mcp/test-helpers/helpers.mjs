@@ -99,6 +99,7 @@ export async function startBackend({ now = Date.now } = {}) {
     googleStatus: undefined, // force an answer to /auth/connector/google
     sessionStatus: undefined, // force an answer to /auth/connector/session
     sessionAs: undefined, // answer every renewal with this person's session
+    meStatus: undefined, // force an answer to /auth/me
     down: false,
     counter: 0,
   };
@@ -138,6 +139,7 @@ export async function startBackend({ now = Date.now } = {}) {
       return send(res, 200, newSession(who));
     }
     if (req.method === "GET" && path === "/auth/me") {
+      if (backend.meStatus) return send(res, backend.meStatus, { error: "refused" });
       return live ? send(res, 200, { email: `${person}@leadershipnowproject.com` }) : send(res, 401, { error: "Unauthorized" });
     }
     if (req.method === "GET" && path === "/links") {
@@ -217,8 +219,8 @@ export function authorizeUrl(params) {
   return `/authorize?${new URLSearchParams(params)}`;
 }
 
-/** /authorize as Claude sends the person there. Returns the response. */
-export async function authorize(ctx, { clientId, challenge, state = "claude-state-1", redirectUri = CLAUDE_CALLBACK, extra = {}, cookie } = {}) {
+/** /authorize as Claude sends the person there. Returns the response: the confirmation page, for a good request. */
+export async function authorizePage(ctx, { clientId, challenge, state = "claude-state-1", redirectUri = CLAUDE_CALLBACK, extra = {}, cookie, headers = {} } = {}) {
   const params = {
     response_type: "code",
     client_id: clientId,
@@ -230,7 +232,27 @@ export async function authorize(ctx, { clientId, challenge, state = "claude-stat
     ...extra,
   };
   for (const key of Object.keys(params)) if (params[key] === undefined) delete params[key];
-  return ctx.get(authorizeUrl(params), cookie ? { headers: { Cookie: cookie } } : {});
+  return ctx.get(authorizeUrl(params), { headers: { ...headers, ...(cookie ? { Cookie: cookie } : {}) } });
+}
+
+/** The sealed token in the confirmation page's form. */
+export function confirmationFrom(html) {
+  return /<input type="hidden" name="confirmation" value="([^"]+)">/.exec(html)?.[1];
+}
+
+/** Press a button on the confirmation page. Returns the response. */
+export function pressButton(ctx, { confirmation, cookie, choice = "continue", headers = {} }) {
+  return ctx.postForm("/authorize/continue", { confirmation, choice }, { ...headers, ...(cookie ? { Cookie: cookie } : {}) });
+}
+
+/**
+ * /authorize, then "Continue with Google" on the page it shows. Returns the
+ * redirect to Google; a request /authorize refuses comes back as it was.
+ */
+export async function authorize(ctx, params = {}) {
+  const page = await authorizePage(ctx, params);
+  if (page.status !== 200) return page;
+  return pressButton(ctx, { confirmation: confirmationFrom(await page.text()), cookie: cookieFrom(page), headers: params.headers });
 }
 
 export function cookieFrom(res) {

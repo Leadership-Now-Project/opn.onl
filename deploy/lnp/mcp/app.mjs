@@ -53,14 +53,27 @@ export function createApp(config, options = {}) {
   app.get("/health", (_req, res) => res.type("text/plain").send("ok"));
   app.use(oauth.router);
 
-  app.all("/mcp", express.json({ limit: MAX_BODY_BYTES }), async (req, res) => {
+  // Who is asking comes first: a caller without a valid token is answered
+  // before any of the body is read, and only so many times.
+  const signedIn = (req, res, next) => {
     // Stateless: no server-to-client stream (GET) and no session to end (DELETE).
     if (req.method !== "POST") {
       res.set("Allow", "POST");
       return jsonRpcError(res, 405, "Method not allowed");
     }
     const person = oauth.authenticate(req, res);
-    if (!person) return jsonRpcError(res, 401, "Sign in to LNP Links");
+    if (!person) {
+      const wait = oauth.unauthenticatedWait(req);
+      if (wait === 0) return jsonRpcError(res, 401, "Sign in to LNP Links");
+      res.set("Retry-After", String(wait));
+      return jsonRpcError(res, 429, "Too many requests; try again later");
+    }
+    res.locals.person = person;
+    next();
+  };
+
+  app.all("/mcp", signedIn, express.json({ limit: MAX_BODY_BYTES }), async (req, res) => {
+    const { person } = res.locals;
 
     // The session inside the token is at most an hour old, but the person may
     // have been removed since: ask the backend before running anything.
@@ -75,7 +88,8 @@ export function createApp(config, options = {}) {
     } catch {
       return jsonRpcError(res, 502, "LNP Links is not reachable right now");
     }
-    if (status === 401 || status === 403) {
+    // 404 is the backend's answer for an account that no longer exists.
+    if (status === 401 || status === 403 || status === 404) {
       console.error(`session refused by backend: ${status}`);
       oauth.endSignIn(person.sid, person.sessionEnd);
       oauth.challenge(res, "The sign-in has ended");
