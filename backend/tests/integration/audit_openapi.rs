@@ -591,6 +591,10 @@ const PUBLIC_OPERATIONS: &[(&str, &str)] = &[
     ("POST", "/auth/cf-access"),
     // Authenticated by the Google authorization code in the body.
     ("POST", "/auth/google"),
+    // Authenticated by the Google ID token in the body.
+    ("POST", "/auth/connector/google"),
+    // Authenticated by the connector's signed assertion in the body.
+    ("POST", "/auth/connector/session"),
     ("POST", "/auth/verify-email"),
     ("POST", "/auth/forgot-password"),
     ("POST", "/auth/reset-password"),

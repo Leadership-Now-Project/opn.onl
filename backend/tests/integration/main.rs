@@ -44,6 +44,7 @@ mod bio_tests;
 mod blocklist_normalisation_tests;
 mod click_cap_race_tests;
 mod click_flush_batch_tests;
+mod connector_sign_in_tests;
 mod data_lifecycle_tests;
 mod dead_link_page_tests;
 mod destination_spelling_tests;

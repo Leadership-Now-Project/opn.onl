@@ -157,6 +157,23 @@ pub async fn spawn_real_app() -> (axum_test::TestServer, DatabaseConnection) {
     (server, db)
 }
 
+/// Like [`spawn_real_app`], with the Claude connector's sign-in switched on.
+/// `connector` carries the Google settings (pointed at a test's own stand-in
+/// for Google's keys) and the renewal secret, given through `AppState`, not the
+/// environment: Google sign-in itself stays off in this process.
+#[allow(dead_code)]
+pub async fn spawn_real_app_with_connector(
+    connector: opn_onl_backend::handlers::connector_auth::ConnectorAuth,
+) -> (axum_test::TestServer, DatabaseConnection) {
+    baseline_env();
+    let db = setup_test_db().await;
+    let mut state = opn_onl_backend::AppState::for_tests(db.clone()).await;
+    state.connector = Some(std::sync::Arc::new(connector));
+    let server = axum_test::TestServer::new(opn_onl_backend::build_router(state))
+        .expect("failed to start test server");
+    (server, db)
+}
+
 /// The REAL router with file sharing switched on, over the bucket the test
 /// passes in (a `MemoryFileStore`: there is no S3 to test against). File
 /// sharing is given through `AppState`, not the environment, so these tests

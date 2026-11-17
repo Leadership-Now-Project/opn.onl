@@ -136,6 +136,19 @@ async fn main() {
         None => tracing::info!("File sharing disabled (FILES_S3_BUCKET not set)"),
     }
 
+    // The Claude connector's sign-in (optional): on with Google sign-in.
+    let connector =
+        opn_onl_backend::handlers::connector_auth::ConnectorAuth::from_env().map(Arc::new);
+    match &connector {
+        Some(connector) if connector.renewal_enabled() => {
+            tracing::info!("Connector sign-in enabled, with session renewal")
+        }
+        Some(_) => tracing::info!(
+            "Connector sign-in enabled; session renewal is off (CONNECTOR_SIGNIN_SECRET not set)"
+        ),
+        None => {}
+    }
+
     let app_state = AppState {
         db,
         ws_state: Some(ws_state.clone()),
@@ -150,6 +163,7 @@ async fn main() {
         files,
         drive: utils::drive::DrivePicker::from_env(),
         embed_check: utils::media::OEmbedChecker::from_env(),
+        connector,
     };
 
     // Handles for the graceful-shutdown flush (so buffered clicks aren't lost on

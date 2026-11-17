@@ -18,6 +18,11 @@
 //! | `GOOGLE_ALLOWED_DOMAINS` | comma-separated email domains that may sign in |
 //! | `GOOGLE_REQUIRE_HD` | default true: the token's `hd` (Workspace domain) must be present and be one of the allowed domains, which keeps out consumer accounts that merely use such an address |
 //!
+//! The Claude connector signs people in with the same Google client, through
+//! Google's redirect flow, and posts the ID token it gets to
+//! `POST /auth/connector/google` (`connector_auth.rs`). That handler and this
+//! one check the token with the one function here, [`verified_id_token`].
+//!
 //! The code, the tokens and the secret are never logged.
 
 use std::collections::HashMap;
@@ -107,6 +112,11 @@ impl GoogleAuthConfig {
 }
 
 static CONFIG: Lazy<Option<GoogleAuthConfig>> = Lazy::new(GoogleAuthConfig::from_env);
+
+/// This process's Google sign-in settings, when it is fully configured.
+pub fn config() -> Option<&'static GoogleAuthConfig> {
+    CONFIG.as_ref()
+}
 /// Keyed by JWKS address, so a test's fake never meets another's keys.
 static JWKS: Lazy<RwLock<HashMap<String, (Instant, JwkSet)>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
@@ -142,6 +152,9 @@ pub enum IdTokenError {
     DomainNotAllowed,
     /// `hd` is missing or is not one of the allowed domains.
     HostedDomainMismatch,
+    /// The caller named the `nonce` it sent to Google, and the token carries
+    /// none or another: the token is not the answer to that request.
+    NonceMismatch,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -162,9 +175,9 @@ impl SignInError {
             Self::NotAjax | Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::GoogleUnavailable(_) => StatusCode::BAD_GATEWAY,
             Self::CodeRefused(_)
-            | Self::Token(IdTokenError::UnknownKey | IdTokenError::Invalid(_)) => {
-                StatusCode::UNAUTHORIZED
-            }
+            | Self::Token(
+                IdTokenError::UnknownKey | IdTokenError::Invalid(_) | IdTokenError::NonceMismatch,
+            ) => StatusCode::UNAUTHORIZED,
             Self::Token(
                 IdTokenError::EmailNotVerified
                 | IdTokenError::DomainNotAllowed
@@ -174,7 +187,7 @@ impl SignInError {
     }
 
     /// What the caller is told. Never the address, the code or a token.
-    fn public_message(&self) -> &'static str {
+    pub(crate) fn public_message(&self) -> &'static str {
         match self {
             Self::NotAjax => "Missing X-Requested-With header",
             Self::BadRequest => "Expected a JSON body with a code",
@@ -188,7 +201,7 @@ impl SignInError {
 
     /// What the log says. Built from fixed text, Google's error code and
     /// library errors only.
-    fn log_detail(&self) -> String {
+    pub(crate) fn log_detail(&self) -> String {
         match self {
             Self::NotAjax => "no X-Requested-With header".to_string(),
             Self::BadRequest => "unreadable request body".to_string(),
@@ -201,6 +214,9 @@ impl SignInError {
             Self::Token(IdTokenError::HostedDomainMismatch) => {
                 "hd claim missing or not an allowed domain".to_string()
             }
+            Self::Token(IdTokenError::NonceMismatch) => {
+                "nonce missing or not the one sent to Google".to_string()
+            }
         }
     }
 }
@@ -211,6 +227,7 @@ struct IdClaims {
     /// A boolean, or in some tokens the string "true".
     email_verified: Option<serde_json::Value>,
     hd: Option<String>,
+    nonce: Option<String>,
 }
 
 /// Check a Google ID token against `jwks` and return its normalised email.
@@ -218,6 +235,23 @@ pub fn verify_id_token(
     token: &str,
     jwks: &JwkSet,
     config: &GoogleAuthConfig,
+) -> Result<String, IdTokenError> {
+    verify_id_token_for(token, jwks, config, None)
+}
+
+/// Compare two strings in time that depends only on their lengths.
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// [`verify_id_token`], and when `expected_nonce` is given the token must also
+/// carry exactly that `nonce`. Every sign-in path's token goes through here.
+pub fn verify_id_token_for(
+    token: &str,
+    jwks: &JwkSet,
+    config: &GoogleAuthConfig,
+    expected_nonce: Option<&str>,
 ) -> Result<String, IdTokenError> {
     let header = decode_header(token).map_err(|e| IdTokenError::Invalid(e.to_string()))?;
     let kid = header
@@ -262,6 +296,12 @@ pub fn verify_id_token(
         let hd_allowed = |hd: &str| config.allowed_domains.iter().any(|d| d == hd);
         if !hd.as_deref().is_some_and(hd_allowed) {
             return Err(IdTokenError::HostedDomainMismatch);
+        }
+    }
+    if let Some(expected) = expected_nonce {
+        let carried = claims.nonce.as_deref().unwrap_or_default();
+        if expected.is_empty() || !constant_time_eq(carried, expected) {
+            return Err(IdTokenError::NonceMismatch);
         }
     }
     Ok(email)
@@ -349,16 +389,22 @@ async fn jwks(config: &GoogleAuthConfig, force_refresh: bool) -> Result<JwkSet, 
     Ok(set)
 }
 
-async fn verify_with_refresh(
+/// Check a Google ID token against Google's published keys (cached, refetched
+/// once when the token names a key the cache lacks) and return its normalised
+/// email. `expected_nonce` is the nonce the caller sent to Google, when its
+/// flow has one. The one check behind `/auth/google` and
+/// `/auth/connector/google`.
+pub async fn verified_id_token(
     token: &str,
     config: &GoogleAuthConfig,
+    expected_nonce: Option<&str>,
 ) -> Result<String, SignInError> {
     let keys_error = |e: String| SignInError::GoogleUnavailable(format!("fetching keys: {e}"));
     let set = jwks(config, false).await.map_err(keys_error)?;
-    match verify_id_token(token, &set, config) {
+    match verify_id_token_for(token, &set, config, expected_nonce) {
         Err(IdTokenError::UnknownKey) => {
             let set = jwks(config, true).await.map_err(keys_error)?;
-            verify_id_token(token, &set, config).map_err(SignInError::Token)
+            verify_id_token_for(token, &set, config, expected_nonce).map_err(SignInError::Token)
         }
         other => other.map_err(SignInError::Token),
     }
@@ -386,7 +432,7 @@ async fn verified_email(
         .id_token
         .filter(|t| !t.is_empty())
         .ok_or_else(|| SignInError::CodeRefused("Google returned no ID token".to_string()))?;
-    verify_with_refresh(&id_token, config).await
+    verified_id_token(&id_token, config, None).await
 }
 
 /// Sign in with a Google account from an allowed domain.
@@ -709,6 +755,46 @@ mod tests {
         let mut c = claims("a@leadershipnowproject.com");
         c["hd"] = json!("example.org");
         assert!(verify(c, &relaxed).is_ok());
+    }
+
+    #[test]
+    fn a_nonce_is_checked_only_when_the_caller_expects_one() {
+        let key = test_key("k1");
+        let check = |claims: Value, expected: Option<&str>| {
+            verify_id_token_for(&token(&key, "k1", claims), &key.jwks, &config(), expected)
+        };
+        let mut with_nonce = claims("a@leadershipnowproject.com");
+        with_nonce["nonce"] = json!("n-123");
+        let without = claims("a@leadershipnowproject.com");
+
+        assert!(check(with_nonce.clone(), Some("n-123")).is_ok());
+        // The popup flow sends no nonce and expects none.
+        assert!(check(without.clone(), None).is_ok());
+        assert!(check(with_nonce.clone(), None).is_ok());
+        for wrong in ["n-124", "N-123", "n-12", "n-1234", ""] {
+            assert_eq!(
+                check(with_nonce.clone(), Some(wrong)),
+                Err(IdTokenError::NonceMismatch),
+                "{wrong:?}"
+            );
+        }
+        assert_eq!(
+            check(without.clone(), Some("n-123")),
+            Err(IdTokenError::NonceMismatch)
+        );
+        // An empty expectation never matches a token without a nonce.
+        assert_eq!(check(without, Some("")), Err(IdTokenError::NonceMismatch));
+        // The nonce is the last check: a refused account is still refused.
+        let mut outsider = claims("a@gmail.com");
+        outsider["nonce"] = json!("n-123");
+        assert_eq!(
+            check(outsider, Some("n-123")),
+            Err(IdTokenError::DomainNotAllowed)
+        );
+        assert_eq!(
+            SignInError::Token(IdTokenError::NonceMismatch).status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]

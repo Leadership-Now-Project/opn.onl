@@ -2,8 +2,9 @@ use utoipa::{OpenApi, ToResponse, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers::{
-    admin, analytics, api_keys, auth, bio, cf_access, contact, default_org, files, folders,
-    google_auth, links, organizations, passkeys, preview_image, reports, secure_view, tags,
+    admin, analytics, api_keys, auth, bio, cf_access, connector_auth, contact, default_org, files,
+    folders, google_auth, links, organizations, passkeys, preview_image, reports, secure_view,
+    tags,
 };
 
 /// `info.description` of the served document (Markdown), set in [`api_doc`].
@@ -129,6 +130,8 @@ pub struct TooManyRequests(pub RateLimitResponse);
         auth::login,
         cf_access::cf_access_login,
         google_auth::google_login,
+        connector_auth::connector_google_login,
+        connector_auth::connector_session,
         auth::verify_email,
         auth::resend_verification,
         auth::forgot_password,
@@ -289,6 +292,9 @@ pub struct TooManyRequests(pub RateLimitResponse);
             auth::DeleteAccountRequest,
             auth::AuthResponse,
             google_auth::GoogleLoginRequest,
+            connector_auth::ConnectorGoogleRequest,
+            connector_auth::ConnectorSessionRequest,
+            connector_auth::ConnectorSession,
             auth::MessageResponse,
             auth::AppSettingsResponse,
             default_org::DefaultOrgInfo,

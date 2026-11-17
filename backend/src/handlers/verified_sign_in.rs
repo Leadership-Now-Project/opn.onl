@@ -1,8 +1,9 @@
 //! Sign-in for an email address an identity provider has already verified.
 //!
-//! `POST /auth/cf-access` and `POST /auth/google` each check their provider's
-//! token and then call [`sign_in_verified_email`], so the two cannot drift on
-//! what happens next: which account the address maps to, when one is created,
+//! `POST /auth/cf-access`, `POST /auth/google` and `POST /auth/connector/google`
+//! each check their provider's token and then come here ([`verified_user`],
+//! which [`sign_in_verified_email`] wraps), so they cannot drift on what
+//! happens next: which account the address maps to, when one is created,
 //! who becomes the first admin, and who is refused.
 //!
 //! Accounts created here are verified (the provider vouched for the address)
@@ -39,22 +40,10 @@ pub async fn sign_in_verified_email(
     email: &str,
     source: &'static str,
 ) -> Response {
-    let user = match find_or_create_user(&state.db, email, source).await {
+    let user = match verified_user(state, email, source).await {
         Ok(user) => user,
         Err((status, message)) => return json_error(status, message),
     };
-    if user.is_disabled() {
-        return json_error(StatusCode::FORBIDDEN, "This account is disabled");
-    }
-    // A failure here does not refuse the sign-in: the person can still reach
-    // their own links, and the next sign-in tries again.
-    if let Err(error) = crate::handlers::default_org::join_at_sign_in(state, &user).await {
-        tracing::error!(
-            user_id = user.id,
-            "Failed to join the default organization: {}",
-            error
-        );
-    }
 
     match create_jwt(user.id, &user.email, user.token_version) {
         Ok(token) => (
@@ -78,8 +67,32 @@ pub async fn sign_in_verified_email(
     }
 }
 
-/// A refusal from [`find_or_create_user`]: status and public message.
-type Refusal = (StatusCode, &'static str);
+/// The account `email` signs in to, created on first sign-in, or the refusal
+/// (status and public message) to answer with. Everything [`sign_in_verified_email`] does short of making
+/// the session; the same rules about `email` and `source` apply.
+pub async fn verified_user(
+    state: &AppState,
+    email: &str,
+    source: &'static str,
+) -> Result<users::Model, Refusal> {
+    let user = find_or_create_user(&state.db, email, source).await?;
+    if user.is_disabled() {
+        return Err((StatusCode::FORBIDDEN, "This account is disabled"));
+    }
+    // A failure here does not refuse the sign-in: the person can still reach
+    // their own links, and the next sign-in tries again.
+    if let Err(error) = crate::handlers::default_org::join_at_sign_in(state, &user).await {
+        tracing::error!(
+            user_id = user.id,
+            "Failed to join the default organization: {}",
+            error
+        );
+    }
+    Ok(user)
+}
+
+/// A refused sign-in: status and public message.
+pub type Refusal = (StatusCode, &'static str);
 
 fn database_error() -> Refusal {
     (StatusCode::INTERNAL_SERVER_ERROR, "Database error")

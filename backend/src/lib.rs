@@ -63,6 +63,12 @@ pub struct AppState {
     /// links are then created unchecked, and say so. Tests put a stand-in
     /// here, so no test reaches the network.
     pub embed_check: Option<Arc<dyn utils::media::EmbedChecker>>,
+    /// Sign-in for the Claude connector (`handlers/connector_auth.rs`): the
+    /// Google settings its ID tokens are checked with, and the secret its
+    /// renewal assertions are signed with. `None` unless Google sign-in is
+    /// configured; `/auth/connector/*` then answers 404 and nothing else
+    /// behaves differently.
+    pub connector: Option<Arc<handlers::connector_auth::ConnectorAuth>>,
 }
 
 impl AppState {
@@ -90,6 +96,9 @@ impl AppState {
             // Off: a test never asks YouTube or Vimeo anything. A test of
             // the check sets a stand-in.
             embed_check: None,
+            // Off, as on an instance without Google sign-in. A test of the
+            // connector's sign-in sets one pointed at a local stand-in.
+            connector: None,
         }
     }
 }
@@ -441,6 +450,14 @@ pub fn build_router(app_state: AppState) -> Router {
             post(handlers::cf_access::cf_access_login),
         )
         .route("/auth/google", post(handlers::google_auth::google_login))
+        .route(
+            "/auth/connector/google",
+            post(handlers::connector_auth::connector_google_login),
+        )
+        .route(
+            "/auth/connector/session",
+            post(handlers::connector_auth::connector_session),
+        )
         .route("/auth/verify-email", post(handlers::auth::verify_email))
         .route(
             "/auth/resend-verification",

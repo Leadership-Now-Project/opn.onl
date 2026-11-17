@@ -4,6 +4,7 @@ pub mod api_keys;
 pub mod auth;
 pub mod bio;
 pub mod cf_access;
+pub mod connector_auth;
 pub mod contact;
 pub mod default_org;
 pub mod files;
