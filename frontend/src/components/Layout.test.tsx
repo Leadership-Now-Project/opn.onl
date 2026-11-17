@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '../test/test-utils';
 import { blockSiteStorage } from '../test/helpers';
 import ErrorBoundary from './ErrorBoundary';
 import Layout from './Layout';
+import { cachedDriveToken, rememberDriveToken } from '../utils/driveToken';
 
 // Mock the Outlet component from react-router-dom
 vi.mock('react-router-dom', async () => {
@@ -159,6 +160,106 @@ describe('Layout Component', () => {
             // Look for logout button/link
             const logoutButton = screen.queryByText(/log out/i) || 
                                 screen.queryByRole('button', { name: /logout/i });
+        });
+    });
+
+    describe('Logging out', () => {
+        it('clears the session and lands on /login without leaving the app', async () => {
+            localStorage.setItem('token', 'test-token');
+            localStorage.setItem('is_admin', 'true');
+            // The build flag that used to send logout to Cloudflare Access's
+            // logout address instead. It no longer means anything.
+            vi.stubEnv('VITE_CF_ACCESS', 'true');
+            const fetchCalls = vi.mocked(global.fetch).mock.calls.length;
+            // A Google Drive token from this session: the next person to sign
+            // in on this tab must not find it.
+            rememberDriveToken({ clientId: 'client-1', token: 'ya29.this-session', expiresAt: Date.now() + 3_600_000 });
+            try {
+                const { user } = render(<Layout />, { route: '/dashboard' });
+
+                await user.click(screen.getByRole('button', { name: 'Account menu' }));
+                await user.click(screen.getByRole('button', { name: /log out/i }));
+
+                expect(localStorage.removeItem).toHaveBeenCalledWith('token');
+                expect(localStorage.removeItem).toHaveBeenCalledWith('is_admin');
+                expect(cachedDriveToken()).toBeNull();
+                expect(window.location.pathname).toBe('/login');
+                // And no request that could sign the visitor straight back in.
+                expect(vi.mocked(global.fetch).mock.calls.length).toBe(fetchCalls);
+            } finally {
+                vi.unstubAllEnvs();
+            }
+        });
+    });
+
+    describe('Sign up in a stock build', () => {
+        // The Google sign-in lookup belongs to the LNP build
+        // (Layout.lnp.test.tsx). A stock build's public pages make no API
+        // request at all, signed out or in, whatever the server would say.
+        it('offers "Sign up" without asking the server anything', async () => {
+            vi.mocked(global.fetch).mockImplementation((() => Promise.resolve({
+                ok: true,
+                status: 200,
+                json: () => Promise.resolve({ google_client_id: 'client-1.apps.googleusercontent.com' }),
+            })) as any);
+            try {
+                render(<Layout />);
+                fireEvent.click(screen.getByRole('button', { name: /toggle menu/i }));
+                await new Promise((resolve) => setTimeout(resolve, 20));
+
+                expect(global.fetch).not.toHaveBeenCalled();
+                const signUp = screen.getAllByRole('link', { name: 'Sign up' });
+                expect(signUp).toHaveLength(2);
+                signUp.forEach(link => expect(link).toHaveAttribute('href', '/register'));
+            } finally {
+                vi.mocked(global.fetch).mockReset();
+            }
+        });
+
+        it('asks the server nothing while signed in either', async () => {
+            localStorage.setItem('token', 'test-token');
+            render(<Layout />);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+
+            expect(global.fetch).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('Width of the header and footer', () => {
+        const containers = (container: HTMLElement) => [
+            container.querySelector('header > div'),
+            container.querySelector('footer > div'),
+        ];
+
+        it('matches the full-width dashboard for a signed-in user on /dashboard', () => {
+            localStorage.setItem('token', 'test-token');
+            const { container } = render(<Layout />, { route: '/dashboard' });
+
+            for (const element of containers(container)) {
+                expect(element).toHaveClass('max-w-[120rem]', 'w-full', 'mx-auto', 'px-4', 'sm:px-6', 'lg:px-8');
+                expect(element).not.toHaveClass('max-w-7xl');
+            }
+        });
+
+        it('stays a centred column on every other page', () => {
+            localStorage.setItem('token', 'test-token');
+            for (const route of ['/', '/settings', '/overview']) {
+                const { container, unmount } = render(<Layout />, { route });
+                for (const element of containers(container)) {
+                    expect(element).toHaveClass('max-w-7xl', 'mx-auto', 'px-4', 'sm:px-6', 'lg:px-8');
+                    expect(element).not.toHaveClass('max-w-[120rem]');
+                }
+                unmount();
+            }
+        });
+
+        it('stays a centred column on /dashboard for a signed-out visitor', () => {
+            const { container } = render(<Layout />, { route: '/dashboard' });
+
+            for (const element of containers(container)) {
+                expect(element).toHaveClass('max-w-7xl');
+                expect(element).not.toHaveClass('max-w-[120rem]');
+            }
         });
     });
 

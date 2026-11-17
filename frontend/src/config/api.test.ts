@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { cachedDriveToken, rememberDriveToken } from '../utils/driveToken';
 import {
     API_BASE_URL,
     API_ENDPOINTS,
@@ -237,6 +238,7 @@ describe('authFetch', () => {
 
     it('clears the rejected session and throws a SessionExpiredError', async () => {
         vi.mocked(global.fetch).mockResolvedValue({ status: 401 } as Response);
+        rememberDriveToken({ clientId: 'client-1', token: 'ya29.this-session', expiresAt: Date.now() + 3_600_000 });
         localStorage.setItem('token', 'expired-token');
         localStorage.setItem('is_admin', 'false');
 
@@ -248,6 +250,8 @@ describe('authFetch', () => {
         expect((failure as Error).message).toBe('Session expired. Please log in again.');
         expect(localStorage.getItem('token')).toBeNull();
         expect(localStorage.getItem('is_admin')).toBeNull();
+        // The Google Drive token goes with the session.
+        expect(cachedDriveToken()).toBeNull();
     });
 });
 

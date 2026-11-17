@@ -49,6 +49,26 @@ pub struct AppState {
     /// false; guards go through [`handlers::verification_satisfied`] so they
     /// cannot forget the switch. The stored `email_verified` column is not it.
     pub require_email_verification: bool,
+    /// File sharing: the bucket uploaded files live in, and the limits. `None`
+    /// until `FILES_S3_BUCKET` is set; the `/files` routes then answer 404
+    /// and nothing else behaves differently.
+    pub files: Option<utils::files::FileSharing>,
+    /// Google's file picker for the dashboard's "Google Drive Files" button.
+    /// `None` until `GOOGLE_PICKER_API_KEY` and `GOOGLE_PICKER_APP_ID` are set
+    /// on an instance with Google sign-in; `GET /auth/settings` then has no
+    /// `drive` entry and nothing else behaves differently.
+    pub drive: Option<utils::drive::DrivePicker>,
+    /// Asks YouTube or Vimeo whether a video can be embedded, when a media
+    /// link is created. `None` when `MEDIA_EMBED_CHECK` turns it off: media
+    /// links are then created unchecked, and say so. Tests put a stand-in
+    /// here, so no test reaches the network.
+    pub embed_check: Option<Arc<dyn utils::media::EmbedChecker>>,
+    /// Sign-in for the Claude connector (`handlers/connector_auth.rs`): the
+    /// Google settings its ID tokens are checked with, and the secret its
+    /// renewal assertions are signed with. `None` unless Google sign-in is
+    /// configured; `/auth/connector/*` then answers 404 and nothing else
+    /// behaves differently.
+    pub connector: Option<Arc<handlers::connector_auth::ConnectorAuth>>,
 }
 
 impl AppState {
@@ -68,6 +88,17 @@ impl AppState {
             // developer's `.env` must not flip the suite. Production reads the
             // variable once in `main`.
             require_email_verification: true,
+            // Off, as on an instance without a bucket. A test that needs file
+            // sharing sets this to a `MemoryFileStore`.
+            files: None,
+            // Off, as on an instance without the picker settings.
+            drive: None,
+            // Off: a test never asks YouTube or Vimeo anything. A test of
+            // the check sets a stand-in.
+            embed_check: None,
+            // Off, as on an instance without Google sign-in. A test of the
+            // connector's sign-in sets one pointed at a local stand-in.
+            connector: None,
         }
     }
 }
@@ -414,6 +445,19 @@ pub fn build_router(app_state: AppState) -> Router {
         // Authentication routes
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
+        .route(
+            "/auth/cf-access",
+            post(handlers::cf_access::cf_access_login),
+        )
+        .route("/auth/google", post(handlers::google_auth::google_login))
+        .route(
+            "/auth/connector/google",
+            post(handlers::connector_auth::connector_google_login),
+        )
+        .route(
+            "/auth/connector/session",
+            post(handlers::connector_auth::connector_session),
+        )
         .route("/auth/verify-email", post(handlers::auth::verify_email))
         .route(
             "/auth/resend-verification",
@@ -492,6 +536,10 @@ pub fn build_router(app_state: AppState) -> Router {
         )
         .route("/links/build-utm", post(handlers::links::build_utm_url))
         .route("/links/sparklines", get(handlers::links::get_sparklines))
+        .route(
+            "/links/preview-image",
+            get(handlers::preview_image::preview_image),
+        )
         .route(
             "/links/preview-metadata",
             post(handlers::links::get_link_preview_metadata),
@@ -696,9 +744,27 @@ pub fn build_router(app_state: AppState) -> Router {
         // Registered before /api/bio/:username so the static path is unambiguous.
         .route("/api/bio/avatar", get(handlers::links::proxy_bio_avatar))
         .route("/api/bio/:username", get(handlers::bio::get_public_bio))
+        // File sharing. Always routed, like every documented operation; the
+        // handlers answer 404 to a signed-in caller while no bucket is
+        // configured (`AppState::files`).
+        .route("/files/uploads", post(handlers::files::start_upload))
+        .route(
+            "/files/uploads/:upload_id/complete",
+            post(handlers::files::complete_upload),
+        )
+        .route("/files/usage", get(handlers::files::get_usage))
+        .route(
+            "/links/:id/secure-view",
+            put(handlers::secure_view::set_secure_view),
+        )
         // Redirect route (must be last to not conflict with other routes)
         .route("/:code/verify", post(handlers::links::verify_link_password))
         .route("/:code/preview", get(handlers::links::preview_link))
+        // Secure View: the viewer page's two calls.
+        .route("/:code/view", post(handlers::secure_view::open_view))
+        .route("/:code/view/file", get(handlers::secure_view::view_file))
+        // Media links: the media page's one call.
+        .route("/:code/media", post(handlers::media::open_media))
         .route("/:code", get(handlers::links::redirect_link))
         // State
         .with_state(app_state)

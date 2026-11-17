@@ -3,14 +3,23 @@ pub mod analytics;
 pub mod api_keys;
 pub mod auth;
 pub mod bio;
+pub mod cf_access;
+pub mod connector_auth;
 pub mod contact;
+pub mod default_org;
+pub mod files;
 pub mod folders;
+pub mod google_auth;
 pub mod link_access;
 pub mod links;
+pub mod media;
 pub mod organizations;
 pub mod passkeys;
+pub mod preview_image;
 pub mod reports;
+pub mod secure_view;
 pub mod tags;
+pub mod verified_sign_in;
 pub mod websocket;
 
 use axum::{

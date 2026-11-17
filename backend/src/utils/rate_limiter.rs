@@ -150,6 +150,18 @@ pub struct RateLimiters {
     /// Abuse reports (`POST /report`). Public and unauthenticated, so a small
     /// hourly budget per client, separate from the general API tier.
     pub report: Arc<RateLimiter>,
+    /// Opening a Secure View link (`POST /{code}/view`), per IP and code. Each
+    /// success counts a click and may use up a one-time link, so it does not
+    /// ride the generous redirect budget.
+    pub secure_view: Arc<RateLimiter>,
+    /// The same, shared across every code for one IP, so rotating codes does
+    /// not multiply the budget.
+    pub secure_view_ip: Arc<RateLimiter>,
+    /// The media page asking what to show (`POST /{code}/media`), per IP
+    /// across every code. The call counts nothing and needs a ticket, so the
+    /// budget only has to keep one client from hammering it: generous enough
+    /// for a room of people behind one address opening the same link.
+    pub media_page: Arc<RateLimiter>,
 }
 
 impl Default for RateLimiters {
@@ -174,6 +186,11 @@ impl Default for RateLimiters {
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10, 3600))),
             // Public abuse reports: 5 per hour per client.
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(5, 3600))),
+            // Secure View: 10 emails a minute for one link, 30 across links.
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10, 60))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(30, 60))),
+            // Media page: 120 a minute per client.
+            media_page: Arc::new(RateLimiter::new(RateLimitConfig::new(120, 60))),
         }
     }
 }
@@ -198,6 +215,9 @@ impl RateLimiters {
                 limiters.password_verify_ip.cleanup();
                 limiters.contact.cleanup();
                 limiters.report.cleanup();
+                limiters.secure_view.cleanup();
+                limiters.secure_view_ip.cleanup();
+                limiters.media_page.cleanup();
                 tracing::debug!("Rate limiter cleanup completed");
             }
         });
@@ -430,10 +450,20 @@ const API_PREFIXES: &[&str] = &[
 /// generated codes and, worse, routed `POST /contact` into the relaxed 100 req/s
 /// redirect bucket (an email-flood vector).
 fn is_redirect_path(path: &str) -> bool {
+    if is_files_api_path(path) {
+        return false;
+    }
     match path.trim_start_matches('/').split('/').next() {
         Some(first) => !first.is_empty() && !API_PREFIXES.contains(&first),
         None => false,
     }
+}
+
+/// The file-sharing API: `/files/uploads`, `/files/uploads/{id}/complete` and
+/// `/files/usage`. Named exactly, not as a `files` prefix: `/files` alone is
+/// still the short code `files`, which may already exist.
+fn is_files_api_path(path: &str) -> bool {
+    path == "/files/usage" || path == "/files/uploads" || path.starts_with("/files/uploads/")
 }
 
 /// `POST /report` is the abuse-report API (and stays on the API buckets,
@@ -456,6 +486,31 @@ fn route_code(path: &str) -> String {
     urlencoding::decode(raw)
         .map(|decoded| decoded.into_owned())
         .unwrap_or_else(|_| raw.to_string())
+}
+
+/// `POST /{code}/view`: a visitor giving the Secure View viewer an email. Two
+/// segments exactly, the first a short code, so `GET /view` (the code `view`)
+/// and the file request (`GET /{code}/view/file`) are not it.
+fn is_secure_view_open(method: &Method, path: &str) -> bool {
+    is_code_call(method, path, "view")
+}
+
+/// `POST /{code}/media`: the media page asking what to show. Two segments
+/// exactly, so `GET /media` (the code `media`) is not it.
+fn is_media_page_open(method: &Method, path: &str) -> bool {
+    is_code_call(method, path, "media")
+}
+
+/// `POST /{code}/{word}` and nothing longer, the first segment a short code.
+fn is_code_call(method: &Method, path: &str, word: &str) -> bool {
+    if *method != Method::POST || !is_redirect_path(path) {
+        return false;
+    }
+    let mut segments = path.trim_start_matches('/').split('/');
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some(code), Some(second), None) if !code.is_empty() && second == word
+    )
 }
 
 /// Auth API routes are `/auth` and `/auth/...` only. A short code that merely
@@ -525,6 +580,24 @@ pub async fn rate_limit_middleware(
                     .check(&format!("pwverify:{}:{}", ip, route_code(path)))
             }
         }
+    } else if is_secure_view_open(req.method(), path) {
+        // Same two budgets as a link password: one per link, and one across
+        // links so that rotating codes buys nothing.
+        match limiters
+            .secure_view_ip
+            .check(&format!("secure-view-ip:{}", ip))
+        {
+            limited @ RateLimitResult::Limited { .. } => limited,
+            RateLimitResult::Allowed { .. } => {
+                limiters
+                    .secure_view
+                    .check(&format!("secure-view:{}:{}", ip, route_code(path)))
+            }
+        }
+    } else if is_media_page_open(req.method(), path) {
+        // Its own budget, not the redirect's hundred a second: the call reads
+        // the database a few times and is made once per page load.
+        limiters.media_page.check(&format!("media-page:{}", ip))
     } else if is_auth_path(path) && req.method() == axum::http::Method::POST {
         // Only the POSTs (sign-in, sign-up, password and passkey operations)
         // share the strict auth budget. Pages read /auth/me, /auth/settings,
@@ -621,6 +694,35 @@ mod tests {
         assert!(!is_redirect_path("/admin/stats"));
         assert!(!is_redirect_path("/api/bio/someone"));
         assert!(!is_redirect_path("/health"));
+        // The file-sharing API is not a redirect; the code `files` still is.
+        assert!(!is_redirect_path("/files/uploads"));
+        assert!(!is_redirect_path("/files/uploads/12/complete"));
+        assert!(!is_redirect_path("/files/usage"));
+        assert!(is_redirect_path("/files"));
+        assert!(is_redirect_path("/files/preview"));
+        assert!(is_redirect_path("/files/verify"));
+        // Opening a Secure View link has its own budget. The file request,
+        // and the short code `view`, stay on the redirect budget.
+        assert!(is_secure_view_open(&Method::POST, "/abc123/view"));
+        assert!(is_secure_view_open(&Method::POST, "/%61bc/view"));
+        assert!(!is_secure_view_open(&Method::GET, "/abc123/view"));
+        assert!(!is_secure_view_open(&Method::POST, "/abc123/view/file"));
+        assert!(!is_secure_view_open(&Method::GET, "/abc123/view/file"));
+        assert!(!is_secure_view_open(&Method::POST, "/view"));
+        assert!(!is_secure_view_open(&Method::POST, "/abc123/verify"));
+        assert!(!is_secure_view_open(&Method::POST, "/links/view"));
+        assert!(is_redirect_path("/abc123/view"));
+        assert!(is_redirect_path("/abc123/view/file"));
+        // The media page's call has its own budget; the short code `media`,
+        // and anything longer, does not.
+        assert!(is_media_page_open(&Method::POST, "/abc123/media"));
+        assert!(is_media_page_open(&Method::POST, "/media/media"));
+        assert!(!is_media_page_open(&Method::GET, "/abc123/media"));
+        assert!(!is_media_page_open(&Method::POST, "/media"));
+        assert!(!is_media_page_open(&Method::POST, "/abc123/media/extra"));
+        assert!(!is_media_page_open(&Method::POST, "/abc123/view"));
+        assert!(!is_media_page_open(&Method::POST, "/links/media"));
+        assert!(!is_secure_view_open(&Method::POST, "/abc123/media"));
         // Root / empty is not a redirect.
         assert!(!is_redirect_path("/"));
     }
@@ -688,6 +790,9 @@ mod tests {
             password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(2, 60))),
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            media_page: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
         });
         let app = Router::new()
             .route("/:code/verify", post(|| async { "ok" }))
@@ -730,6 +835,9 @@ mod tests {
             password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 60))),
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            media_page: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
         });
         let app = Router::new()
             .route("/:code/verify", post(|| async { "ok" }))
@@ -789,6 +897,9 @@ mod tests {
             password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 60))),
             contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+            media_page: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
         })
     }
 
@@ -1065,6 +1176,9 @@ mod tests {
                 password_verify_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 60))),
                 contact: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
                 report: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+                secure_view: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+                secure_view_ip: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
+                media_page: Arc::new(RateLimiter::new(RateLimitConfig::new(10_000, 3600))),
             });
 
             let app = Router::new()

@@ -36,6 +36,7 @@ function renderForm(
         tags?: { id: number; name: string; color: string | null; link_count: number }[];
         orgId?: number | null;
         orgName?: string | null;
+        onCatalogChanged?: (kind: 'folder' | 'tag') => void;
     } = {},
 ) {
     const onCreated = vi.fn();
@@ -514,7 +515,7 @@ describe('CreateLinkForm', () => {
             fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: url } });
             fireEvent.click(screen.getByRole('button', { name: 'Check destination' }));
 
-            expect(await screen.findByRole('status')).toHaveTextContent('Reachable · HTTP 200');
+            expect(await screen.findByRole('status')).toHaveTextContent('Page found (HTTP 200)');
             const [endpoint, init] = vi.mocked(fetch).mock.calls[0];
             expect(String(endpoint)).toMatch(/\/links\/health-check$/);
             expect(init?.method).toBe('POST');
@@ -526,7 +527,7 @@ describe('CreateLinkForm', () => {
             renderForm();
             fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: url } });
             fireEvent.click(screen.getByRole('button', { name: 'Check destination' }));
-            expect(await screen.findByRole('status')).toHaveTextContent('Redirect · HTTP 302');
+            expect(await screen.findByRole('status')).toHaveTextContent('Page found: it redirects onward (HTTP 302)');
         });
 
         it('shows the server error when the destination is refused', async () => {
@@ -561,7 +562,9 @@ describe('CreateLinkForm', () => {
             const status = await screen.findByRole('status');
             // Inside the row, a long sentence took the width the destination needs.
             expect(destination.parentElement).not.toContainElement(status);
-            expect(destination.parentElement).toContainElement(screen.getByRole('button', { name: 'Check destination' }));
+            // The destination shares its row with Paste only; Check and Create sit below.
+            expect(destination.parentElement).toContainElement(screen.getByRole('button', { name: 'Paste' }));
+            expect(destination.parentElement).not.toContainElement(screen.getByRole('button', { name: 'Check destination' }));
         });
 
         it('says how long to wait when the check is rate limited', async () => {
@@ -582,18 +585,66 @@ describe('CreateLinkForm', () => {
             renderForm();
             fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: url } });
             const button = screen.getByRole('button', { name: 'Check destination' });
+            const healthChecks = () => vi.mocked(fetch).mock.calls.filter(([endpoint]) => String(endpoint).endsWith('/links/health-check'));
             fireEvent.click(button);
             fireEvent.click(button);
-            expect(fetch).toHaveBeenCalledTimes(1);
+            expect(healthChecks()).toHaveLength(1);
             await waitFor(() => expect(button).toBeDisabled());
 
             await act(async () => {
                 resolveHealth?.(jsonResponse({ url, reachable: true, status_code: 204, error: null }));
             });
-            expect(await screen.findByRole('status')).toHaveTextContent('Reachable · HTTP 204');
+            expect(await screen.findByRole('status')).toHaveTextContent('Page found (HTTP 204)');
             expect(button).toBeEnabled();
-            expect(fetch).toHaveBeenCalledTimes(1);
+            // After the answer the preview card asks for the page's metadata; the check itself ran once.
+            expect(healthChecks()).toHaveLength(1);
         });
+
+        it('explains a refusal in words, not just a status code', async () => {
+            arm({ url, reachable: false, status_code: 403, response_time_ms: 9, error: 'HTTP 403' });
+            renderForm();
+            fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: url } });
+            fireEvent.click(screen.getByRole('button', { name: 'Check destination' }));
+            expect(await screen.findByRole('status')).toHaveTextContent(
+                'The site refused our automatic check (HTTP 403). It may still open normally in a browser',
+            );
+        });
+
+        it('previews the destination after a check', async () => {
+            arm({ url, reachable: true, status_code: 200, response_time_ms: 12, error: null });
+            renderForm();
+            fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: url } });
+            fireEvent.click(screen.getByRole('button', { name: 'Check destination' }));
+            await screen.findByRole('status');
+            await waitFor(() => {
+                const endpoints = vi.mocked(fetch).mock.calls.map(([endpoint]) => String(endpoint));
+                expect(endpoints.some(endpoint => endpoint.endsWith('/links/preview-metadata'))).toBe(true);
+            });
+        });
+    });
+
+    it('creates a folder from the form and files the new link in it', async () => {
+        const onCatalogChanged = vi.fn();
+        vi.mocked(fetch).mockImplementation(async (endpoint) => (
+            String(endpoint).endsWith('/folders')
+                ? jsonResponse({ id: 31, name: 'Board', color: null, link_count: 0 }, 201)
+                : jsonResponse({ id: 1, code: 'abcde' }, 201)
+        ));
+        const { user, onCreated } = renderForm(settings, { onCatalogChanged });
+        fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: 'https://example.com/a' } });
+        await openAdvanced();
+        await user.click(screen.getByRole('button', { name: 'New folder' }));
+        await user.type(screen.getByLabelText('New folder name'), 'Board');
+        await user.click(screen.getByRole('button', { name: 'Add' }));
+
+        await waitFor(() => expect(onCatalogChanged).toHaveBeenCalledWith('folder'));
+        const folderPost = vi.mocked(fetch).mock.calls.find(([endpoint]) => String(endpoint).endsWith('/folders'));
+        expect(JSON.parse(String(folderPost?.[1]?.body))).toEqual({ name: 'Board' });
+
+        await user.click(screen.getByRole('button', { name: /^Create$/ }));
+        await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+        const linkPost = vi.mocked(fetch).mock.calls.find(([endpoint]) => String(endpoint).endsWith('/links'));
+        expect(JSON.parse(String(linkPost?.[1]?.body))).toMatchObject({ folder_id: 31 });
     });
 
     it('files a new link in the open team, folder and tags', async () => {

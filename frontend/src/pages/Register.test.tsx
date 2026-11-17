@@ -20,6 +20,18 @@ describe('Register Page', () => {
     expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
   });
 
+  it('asks the server nothing before the form is submitted, in a stock build', async () => {
+    // The Google sign-in lookup belongs to the LNP build (Register.lnp.test.tsx).
+    vi.mocked(global.fetch).mockImplementation((() =>
+      mockFetchResponse({ google_client_id: 'client-1.apps.googleusercontent.com' })) as any);
+    render(<Register />, { route: '/register' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe('/register');
+    expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
+  });
+
   it('posts the form so a native submit cannot leak credentials into the URL', () => {
     render(<Register />);
     expect(screen.getByLabelText(/email address/i).closest('form')).toHaveAttribute('method', 'post');

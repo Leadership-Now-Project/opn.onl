@@ -21,6 +21,7 @@ export const LinkPreviewCard = ({ url, className = '', compact = false }: LinkPr
     const [preview, setPreview] = useState<LinkPreviewData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(false);
+    const [imageSrc, setImageSrc] = useState<string | null>(null);
 
     useEffect(() => {
         const fetchPreview = async () => {
@@ -47,6 +48,33 @@ export const LinkPreviewCard = ({ url, className = '', compact = false }: LinkPr
 
         fetchPreview();
     }, [url]);
+
+    // The preview image comes through this server (GET /links/preview-image)
+    // and is shown from a local blob: the viewer's browser never connects to
+    // the image host, which would hand it the viewer's IP address.
+    const imageUrl = preview?.image ?? null;
+    useEffect(() => {
+        setImageSrc(null);
+        if (!imageUrl || compact) return;
+        let cancelled = false;
+        let objectUrl: string | null = null;
+        (async () => {
+            try {
+                const res = await authFetch(`${API_ENDPOINTS.previewImage}?${new URLSearchParams({ url: imageUrl })}`);
+                if (!res.ok) return;
+                const blob = await res.blob();
+                if (cancelled) return;
+                objectUrl = URL.createObjectURL(blob);
+                setImageSrc(objectUrl);
+            } catch {
+                // No image: the card keeps its placeholder.
+            }
+        })();
+        return () => {
+            cancelled = true;
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
+        };
+    }, [imageUrl, compact]);
 
     const getDomain = (url: string) => {
         try {
@@ -99,11 +127,16 @@ export const LinkPreviewCard = ({ url, className = '', compact = false }: LinkPr
 
     return (
         <div className={`bg-white border border-slate-200 rounded-lg overflow-hidden hover:shadow-md transition-shadow ${className}`}>
-            {/* Do not render remote preview images/favicons directly: doing so
-                leaks the viewer's IP address to the destination host. */}
-            <div className="h-20 bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center">
-                <ImageIcon className="h-8 w-8 text-slate-300" />
-            </div>
+            {/* Never render remote preview images/favicons directly: doing so
+                leaks the viewer's IP address to the destination host. The
+                image, when there is one, is the proxied blob above. */}
+            {imageSrc ? (
+                <img src={imageSrc} alt="" className="h-40 w-full object-cover bg-slate-100" />
+            ) : (
+                <div className="h-20 bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center">
+                    <ImageIcon className="h-8 w-8 text-slate-300" />
+                </div>
+            )}
 
             {/* Content */}
             <div className="p-3">

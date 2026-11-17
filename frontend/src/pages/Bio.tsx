@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link as RouterLink } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { motion } from 'framer-motion';
 import { MapPin, Globe, AlertTriangle, ArrowUpRight } from 'lucide-react';
 import { API_ENDPOINTS } from '../config/api';
@@ -126,7 +127,7 @@ export default function Bio() {
                     <h1 className="text-2xl font-bold text-slate-900 mb-2">Profile not found</h1>
                     <p className="text-slate-600 mb-6">This profile doesn't exist or isn't public.</p>
                     <RouterLink
-                        to="/"
+                        to="/" reloadDocument={IS_LNP}
                         className="inline-flex items-center gap-2 bg-primary-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-primary-700"
                     >
                         Go Home
@@ -214,7 +215,7 @@ export default function Bio() {
 
                 {/* Footer */}
                 <div className="mt-10 text-center">
-                    <RouterLink to="/" className={look.footer}>
+                    <RouterLink to="/" reloadDocument={IS_LNP} className={look.footer}>
                         Powered by opn.onl
                     </RouterLink>
                 </div>

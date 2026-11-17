@@ -686,7 +686,10 @@ test.describe('Create form state', () => {
         expect(await horizontalOverflow()).toBe(0);
         input = (await urlInput(page).boundingBox())!;
         button = (await createButton(page).boundingBox())!;
-        expect(button.x).toBeGreaterThan(input.x + input.width); // beside it
+        // The form reads top to bottom at every width: Create sits on the
+        // action row under the destination, at its right end.
+        expect(button.y).toBeGreaterThanOrEqual(input.y + input.height);
+        expect(button.x + button.width).toBeGreaterThan(input.x + input.width);
     });
 
     test('between phone and desktop the destination keeps its width, and a long check answer goes under the row', async ({ page, request }) => {

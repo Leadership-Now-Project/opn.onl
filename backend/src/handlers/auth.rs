@@ -3,6 +3,8 @@ use chrono::{Duration, Utc};
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+use crate::handlers::default_org::DefaultOrgInfo;
 use validator::Validate;
 
 use crate::AppState;
@@ -25,7 +27,7 @@ use axum::http::HeaderMap;
 use std::sync::Arc;
 
 /// Serializes the first-account admin decision. See the signup transaction.
-const FIRST_ACCOUNT_ADMIN_LOCK: i64 = 1_557_021_001;
+pub(crate) const FIRST_ACCOUNT_ADMIN_LOCK: i64 = 1_557_021_001;
 
 #[derive(Deserialize, Validate, ToSchema)]
 pub struct RegisterRequest {
@@ -1647,6 +1649,12 @@ pub async fn delete_account(
 
         crate::handlers::links::invalidate_cached_codes(&state, &cached_codes).await;
 
+        // The files of the links that just went down go with them.
+        crate::utils::files::FilesOfLinks::of_account(&state, user_id)
+            .await
+            .remove(&state)
+            .await;
+
         // After the commit, so the request transaction is only the delete.
         // A failure here still returns 200: the account is gone, and the daily
         // retention task scrubs personal-link click PII of deleted users.
@@ -1709,6 +1717,42 @@ pub struct AppSettingsResponse {
     /// `LINK_EXPIRY_REMINDERS` is on and SMTP is configured. While it is false
     /// the account setting `notify_link_expiry` does nothing.
     pub link_expiry_reminders_enabled: bool,
+    /// The OAuth client id for "Sign in with Google". Present only when Google
+    /// sign-in is fully configured (`handlers/google_auth.rs`); the login page
+    /// then offers Google instead of the password form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_client_id: Option<String>,
+    /// The shared organization every staff account joins at sign-in
+    /// (`DEFAULT_ORG_*`, `handlers/default_org.rs`). Present only when it is
+    /// configured and exists; the dashboard then lists its links.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_org: Option<DefaultOrgInfo>,
+    /// File sharing. Present only when the instance has a bucket for uploaded
+    /// files (`FILES_S3_BUCKET`); the dashboard's Files tab then offers upload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<FileSharingInfo>,
+    /// Google's file picker. Present only when `GOOGLE_PICKER_API_KEY` and
+    /// `GOOGLE_PICKER_APP_ID` are set and Google sign-in is configured; the
+    /// Files tab then offers "Google Drive Files".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive: Option<DrivePickerInfo>,
+}
+
+/// What the browser opens Google's file picker with. Both values are public
+/// by design: the key is a browser key restricted to the dashboard's address.
+#[derive(Serialize, ToSchema)]
+pub struct DrivePickerInfo {
+    pub api_key: String,
+    /// The Google Cloud project number.
+    pub app_id: String,
+}
+
+/// What a client needs to know about file sharing before it uploads.
+#[derive(Serialize, ToSchema)]
+pub struct FileSharingInfo {
+    pub enabled: bool,
+    /// The largest file accepted, in bytes (`FILES_MAX_BYTES`).
+    pub max_bytes: u64,
 }
 
 /// Get app settings
@@ -1795,6 +1839,16 @@ pub async fn get_app_settings(State(state): State<AppState>) -> impl IntoRespons
             require_email_verification,
             email_configured,
             link_expiry_reminders_enabled,
+            files: state.files.as_ref().map(|files| FileSharingInfo {
+                enabled: true,
+                max_bytes: files.max_bytes,
+            }),
+            drive: state.drive.as_ref().map(|drive| DrivePickerInfo {
+                api_key: drive.api_key.clone(),
+                app_id: drive.app_id.clone(),
+            }),
+            google_client_id: crate::handlers::google_auth::configured_client_id(),
+            default_org: crate::handlers::default_org::settings_info(&state.db).await,
         }),
     )
 }

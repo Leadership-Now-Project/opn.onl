@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Loader2, Mail, Lock, Check, CheckCircle, Send } from 'lucide-react';
 import { motion } from 'framer-motion';
-import { API_ENDPOINTS, authFetch, emailVerificationRequired, responseError } from '../config/api';
+import { API_ENDPOINTS, authFetch, emailVerificationRequired, googleSignInClientId, responseError } from '../config/api';
 import SEO from '../components/SEO';
 import { SIGN_IN_NEEDS_STORAGE, safeLocalStorage } from '../utils/storage';
+import { IS_LNP } from '../config/theme';
 
 const passwordRequirements = [
     { label: 'At least 8 characters', test: (p: string) => p.length >= 8 },
@@ -27,6 +28,22 @@ export default function Register() {
         if (token) {
             navigate('/dashboard', { replace: true });
         }
+    }, [navigate]);
+
+    // The LNP dashboard signs people in with Google and makes the account at
+    // the first sign-in, so there is nothing to register here: go to the login
+    // page. `null` until /auth/settings has answered. Asked only in the LNP
+    // build: a stock build makes no API request before the form is submitted.
+    const [googleSignIn, setGoogleSignIn] = useState<boolean | null>(null);
+    useEffect(() => {
+        if (!IS_LNP) return;
+        let cancelled = false;
+        void googleSignInClientId().then((clientId) => {
+            if (cancelled) return;
+            setGoogleSignIn(clientId !== null);
+            if (clientId !== null) navigate('/login', { replace: true });
+        });
+        return () => { cancelled = true; };
     }, [navigate]);
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -94,6 +111,10 @@ export default function Register() {
     };
 
     const allRequirementsMet = passwordRequirements.every(req => req.test(password));
+
+    // LNP build only: no password form while the settings are on their way,
+    // or once they say the page is going to /login.
+    if (IS_LNP && googleSignIn !== false) return null;
 
     // Show verification email sent screen
     if (registrationComplete) {

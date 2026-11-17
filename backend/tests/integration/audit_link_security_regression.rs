@@ -296,6 +296,7 @@ fn click(link_id: i32) -> ClickData {
         browser: None,
         os: None,
         destination: None,
+        viewer_email: None,
         created_at: None,
     }
 }

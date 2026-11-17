@@ -157,6 +157,80 @@ pub async fn spawn_real_app() -> (axum_test::TestServer, DatabaseConnection) {
     (server, db)
 }
 
+/// Like [`spawn_real_app`], with the Claude connector's sign-in switched on.
+/// `connector` carries the Google settings (pointed at a test's own stand-in
+/// for Google's keys) and the renewal secret, given through `AppState`, not the
+/// environment: Google sign-in itself stays off in this process.
+#[allow(dead_code)]
+pub async fn spawn_real_app_with_connector(
+    connector: opn_onl_backend::handlers::connector_auth::ConnectorAuth,
+) -> (axum_test::TestServer, DatabaseConnection) {
+    baseline_env();
+    let db = setup_test_db().await;
+    let mut state = opn_onl_backend::AppState::for_tests(db.clone()).await;
+    state.connector = Some(std::sync::Arc::new(connector));
+    let server = axum_test::TestServer::new(opn_onl_backend::build_router(state))
+        .expect("failed to start test server");
+    (server, db)
+}
+
+/// The REAL router with file sharing switched on, over the bucket the test
+/// passes in (a `MemoryFileStore`: there is no S3 to test against). File
+/// sharing is given through `AppState`, not the environment, so these tests
+/// run in parallel with the rest. Also returns the app's click buffer, so a
+/// test can see that a visit was counted.
+#[allow(dead_code)]
+pub async fn spawn_real_app_with_files(
+    files: opn_onl_backend::utils::files::FileSharing,
+) -> (
+    axum_test::TestServer,
+    DatabaseConnection,
+    std::sync::Arc<opn_onl_backend::utils::ClickBuffer>,
+) {
+    baseline_env();
+    set_env("FORCE_HTTPS", "false");
+    set_env("TRUST_PROXY_HEADERS", "false");
+    if std::env::var("JWT_SECRET").is_err() {
+        set_env("JWT_SECRET", "integration-test-secret-0123456789abcdef");
+    }
+
+    let db = setup_test_db().await;
+    let mut state = opn_onl_backend::AppState::for_tests(db.clone()).await;
+    state.files = Some(files);
+    let clicks = state.click_buffer.clone();
+    let server = axum_test::TestServer::new(opn_onl_backend::build_router(state))
+        .expect("failed to start test server");
+    (server, db, clicks)
+}
+
+/// The REAL router with the media embed check given by the test: a stand-in
+/// for YouTube's and Vimeo's answer, or `None` for the check switched off.
+/// Given through `AppState`, not the environment, and never the real check:
+/// no test reaches the network. Also returns the app's click buffer.
+#[allow(dead_code)]
+pub async fn spawn_real_app_with_embed_check(
+    embed_check: Option<std::sync::Arc<dyn opn_onl_backend::utils::media::EmbedChecker>>,
+) -> (
+    axum_test::TestServer,
+    DatabaseConnection,
+    std::sync::Arc<opn_onl_backend::utils::ClickBuffer>,
+) {
+    baseline_env();
+    set_env("FORCE_HTTPS", "false");
+    set_env("TRUST_PROXY_HEADERS", "false");
+    if std::env::var("JWT_SECRET").is_err() {
+        set_env("JWT_SECRET", "integration-test-secret-0123456789abcdef");
+    }
+
+    let db = setup_test_db().await;
+    let mut state = opn_onl_backend::AppState::for_tests(db.clone()).await;
+    state.embed_check = embed_check;
+    let clicks = state.click_buffer.clone();
+    let server = axum_test::TestServer::new(opn_onl_backend::build_router(state))
+        .expect("failed to start test server");
+    (server, db, clicks)
+}
+
 /// Spawn the REAL router over an HTTP transport (required for WebSocket
 /// upgrades — the default mock transport cannot upgrade) with a REAL
 /// `WsState` installed on `AppState`. Returns the shared `WsState` handle so a

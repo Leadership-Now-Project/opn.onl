@@ -46,6 +46,11 @@ const ResetPassword = lazy(() => import('./pages/ResetPassword'));
 const Admin = lazy(() => import('./pages/Admin'));
 const Redirect = lazy(() => import('./pages/Redirect'));
 const Bio = lazy(() => import('./pages/Bio'));
+// Secure View's viewer. Lazy, like every page that is not prerendered; PDF.js
+// is loaded later still, by this page, when there is a PDF to show.
+const SecureView = lazy(() => import('./pages/SecureView'));
+// A media link's page. Lazy and not prerendered, like the viewer above.
+const MediaPage = lazy(() => import('./pages/MediaPage'));
 
 // `compilePath` only treats `/:` as a param, so `@:username` matched the
 // literal path "/@:username" and /@someone fell through to the short-link
@@ -103,6 +108,12 @@ function App() {
               {/* Safe-link interstitial: the backend 302s opted-in links here so
                   the SPA can show the "you're leaving" screen before continuing. */}
               <Route path="r/:code" element={<Redirect />} />
+              {/* Secure View: the backend sends a visitor of such a file link
+                  here, with a ticket in the fragment. */}
+              <Route path="v/:code" element={<SecureView />} />
+              {/* Media links: the backend sends a visitor of such a link
+                  here, with a ticket in the fragment. */}
+              <Route path="m/:code" element={<MediaPage />} />
               <Route path=":code+" element={<Preview />} />
               {/* Explicit /404 so Redirect's navigate('/404') renders NotFound
                   cleanly instead of leaving a fake /404 in the URL bar. */}

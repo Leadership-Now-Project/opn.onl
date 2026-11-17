@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link as RouterLink } from 'react-router-dom';
+import { IS_LNP, SITE_NAME } from '../config/theme';
 import { ExternalLink, ShieldCheck, ShieldAlert, ShieldQuestion, ArrowRight } from 'lucide-react';
 import { API_ENDPOINTS } from '../config/api';
 import SEO from '../components/SEO';
@@ -135,7 +136,7 @@ export default function Redirect() {
                 <div className="max-w-lg w-full">
                     <div className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
                         <div className="bg-gradient-to-r from-primary-600 to-primary-700 px-6 py-5">
-                            <h1 className="text-xl font-bold text-white">You're leaving opn.onl</h1>
+                            <h1 className="text-xl font-bold text-white">You're leaving {SITE_NAME}</h1>
                             <p className="text-primary-100 text-sm mt-1">
                                 {interstitial.hidden ? 'This link keeps its destination private' : 'Review the destination before continuing'}
                             </p>
@@ -179,7 +180,7 @@ export default function Redirect() {
 
                             <div className="flex gap-3 pt-1">
                                 <RouterLink
-                                    to="/"
+                                    to="/" reloadDocument={IS_LNP}
                                     className="flex-1 text-center rounded-xl border border-slate-200 px-6 py-3 font-medium text-slate-600 hover:bg-slate-50 transition-colors"
                                 >
                                     Cancel

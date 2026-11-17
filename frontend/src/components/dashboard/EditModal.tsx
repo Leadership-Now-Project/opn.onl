@@ -4,6 +4,12 @@ import { X, Flame, ShieldCheck, Route, ChevronDown, LayoutList, MousePointer, Ca
 import { API_ENDPOINTS, authFetch, failureMessage, responseError } from '../../config/api';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { localIsoDate } from '../../utils/localIsoDate';
+import { formatBytes } from '../../utils/fileSize';
+import { ctaProblem, providerName } from '../../utils/media';
+import { destinationProblem } from '../../utils/destination';
+import { SECURE_VIEW_NOT_ELIGIBLE } from '../../utils/secureView';
+import MediaCtaFields from './MediaCtaFields';
+import SecureViewSwitch from './SecureViewSwitch';
 import type { LinkData, LinkUpdatePayload, RoutingRule } from './types';
 import { swatchColor, type CatalogItem } from './linkScope';
 import RoutingRulesEditor from './RoutingRulesEditor';
@@ -58,6 +64,23 @@ export default function EditModal({
     folders = [],
     tags = [],
 }: EditModalProps) {
+    // A file link serves its uploaded file: there is no destination to edit
+    // and no routing rules to give it.
+    const isFile = Boolean(link.file);
+    // A media link shows one video on a page of its own. A new destination
+    // would end that page, so the address is shown, not edited, and there are
+    // no routing rules to give it either. Its button is edited here.
+    const isMedia = Boolean(link.media);
+    const fixedDestination = isFile || isMedia;
+    const ctaLabelWas = link.media?.cta_label ?? '';
+    const ctaUrlWas = link.media?.cta_url ?? '';
+    const [ctaLabel, setCtaLabel] = useState(ctaLabelWas);
+    const [ctaUrl, setCtaUrl] = useState(ctaUrlWas);
+    const secureViewWas = link.file?.secure_view ?? false;
+    const [secureView, setSecureView] = useState(secureViewWas);
+    // Greyed out for a file the viewer cannot show. A link already switched on
+    // can always be switched off.
+    const secureViewEligible = link.file?.secure_view_eligible ?? false;
     const [url, setUrl] = useState(link.original_url);
     const [title, setTitle] = useState(link.title ?? '');
     const [notes, setNotes] = useState(link.notes ?? '');
@@ -100,7 +123,7 @@ export default function EditModal({
     useFocusTrap(dialogRef);
 
     useEffect(() => {
-        if (!routingEnabled) return;
+        if (!routingEnabled || fixedDestination) return;
         let cancelled = false;
         (async () => {
             try {
@@ -121,7 +144,7 @@ export default function EditModal({
             }
         })();
         return () => { cancelled = true; };
-    }, [routingEnabled, link.id, rulesAttempt]);
+    }, [routingEnabled, fixedDestination, link.id, rulesAttempt]);
 
     const retryRulesLoad = () => {
         setRulesSessionMessage('');
@@ -183,9 +206,27 @@ export default function EditModal({
             return;
         }
 
+        const ctaChanged = isMedia && (ctaLabel.trim() !== ctaLabelWas || ctaUrl.trim() !== ctaUrlWas);
+        if (ctaChanged) {
+            const badButton = ctaProblem(ctaLabel, ctaUrl);
+            if (badButton) {
+                setSaveError(badButton);
+                return;
+            }
+        }
+
+        // Only a destination that was edited: an older link may still hold an
+        // address without its slashes, and saving its title must not be refused.
+        const destinationChanged = !fixedDestination && url !== link.original_url;
+        const badDestination = destinationChanged ? destinationProblem(url) : null;
+        if (badDestination) {
+            setSaveError(badDestination);
+            return;
+        }
+
         setSaving(true);
         const payload: LinkUpdatePayload = {
-            original_url: url !== link.original_url ? url : undefined,
+            original_url: destinationChanged ? url : undefined,
             password: password || undefined,
             remove_password: removePassword || undefined,
             remove_expiration: shouldRemoveExpiration || undefined,
@@ -193,6 +234,7 @@ export default function EditModal({
             safe_link_interstitial: interstitialEnabled ? safeLinkInterstitial : undefined,
             bio_visible: bioEnabled ? bioVisible : undefined,
         };
+        if (ctaChanged) payload.media_cta = { label: ctaLabel.trim(), url: ctaUrl.trim() };
         if (title !== (link.title ?? '')) payload.title = title;
         if (notes !== (link.notes ?? '')) payload.notes = notes;
         if (nextExpiresIso) payload.expires_at = nextExpiresIso;
@@ -209,6 +251,15 @@ export default function EditModal({
         }
 
         try {
+            // Before the save: the save reloads the list, which then shows it.
+            if (isFile && secureView !== secureViewWas) {
+                const response = await authFetch(API_ENDPOINTS.linkSecureView(link.id), {
+                    method: 'PUT',
+                    body: JSON.stringify({ enabled: secureView }),
+                });
+                if (!response.ok) throw new Error(await responseError(response, 'Failed to update Secure View'));
+            }
+
             await onSave(link.id, payload);
 
             const beforeTags = (link.tags ?? []).map(tag => tag.id);
@@ -230,7 +281,7 @@ export default function EditModal({
             }
 
             const rules = routingRules.filter(r => r.destination_url.trim());
-            if (routingEnabled && rulesLoad === 'loaded' && rulesSignature(rules) !== loadedSignature) {
+            if (routingEnabled && !fixedDestination && rulesLoad === 'loaded' && rulesSignature(rules) !== loadedSignature) {
                 const response = await authFetch(API_ENDPOINTS.linkRules(link.id), {
                     method: 'PUT',
                     body: JSON.stringify({ rules: rulesPayload(rules) }),
@@ -286,7 +337,45 @@ export default function EditModal({
                         </div>
                     </div>
 
-                    <div>
+                    {link.file && (
+                        <div>
+                            <p className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">File</p>
+                            <div className="rounded-lg border border-line bg-paper px-4 py-2 text-sm text-ink">
+                                {link.file.filename} <span className="text-faint">({formatBytes(link.file.size_bytes)})</span>
+                            </div>
+                            <SecureViewSwitch
+                                id="edit-secure-view"
+                                checked={secureView}
+                                onChange={setSecureView}
+                                disabled={!secureViewEligible && !secureViewWas}
+                                reason={!secureViewEligible ? SECURE_VIEW_NOT_ELIGIBLE : ''}
+                            />
+                        </div>
+                    )}
+
+                    {link.media && (
+                        <div>
+                            <p className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">Video</p>
+                            <div className="rounded-lg border border-line bg-paper px-4 py-2 text-sm text-ink break-all">
+                                {providerName(link.media.provider)}: <span className="font-mono">{link.original_url}</span>
+                            </div>
+                            <p className="mt-1.5 mb-4 text-xs text-faint">
+                                This link opens a page with the video's player on it. To share a different video, create a new link.
+                            </p>
+                            <MediaCtaFields
+                                idPrefix="edit-media"
+                                label={ctaLabel}
+                                url={ctaUrl}
+                                onLabelChange={setCtaLabel}
+                                onUrlChange={setCtaUrl}
+                                labelClass="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5"
+                                fieldClass="w-full rounded-lg border border-line2 bg-surface px-4 py-2 text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint"
+                                disabled={saving}
+                            />
+                        </div>
+                    )}
+
+                    <div hidden={fixedDestination}>
                         <label htmlFor="edit-url" className="block font-mono text-xs uppercase tracking-[0.14em] text-faint mb-1.5">Destination URL</label>
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
                             <input
@@ -561,7 +650,7 @@ export default function EditModal({
                         </label>
                     )}
 
-                    {routingEnabled && (
+                    {routingEnabled && !fixedDestination && (
                         <div className="border-t border-line pt-4">
                             <button
                                 type="button"

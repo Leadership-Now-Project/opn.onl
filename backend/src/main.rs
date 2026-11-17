@@ -128,6 +128,27 @@ async fn main() {
     }
     spawn_backup_task(backup.clone(), ws_state.shutdown_watch());
 
+    // File sharing (optional): a private bucket for uploaded files, and the
+    // sweep that removes the files of deleted and expired links.
+    let files = utils::files::FileSharing::from_env().await;
+    match &files {
+        Some(files) => utils::files::spawn_cleanup_task(db.clone(), files.store.clone()),
+        None => tracing::info!("File sharing disabled (FILES_S3_BUCKET not set)"),
+    }
+
+    // The Claude connector's sign-in (optional): on with Google sign-in.
+    let connector =
+        opn_onl_backend::handlers::connector_auth::ConnectorAuth::from_env().map(Arc::new);
+    match &connector {
+        Some(connector) if connector.renewal_enabled() => {
+            tracing::info!("Connector sign-in enabled, with session renewal")
+        }
+        Some(_) => tracing::info!(
+            "Connector sign-in enabled; session renewal is off (CONNECTOR_SIGNIN_SECRET not set)"
+        ),
+        None => {}
+    }
+
     let app_state = AppState {
         db,
         ws_state: Some(ws_state.clone()),
@@ -139,6 +160,10 @@ async fn main() {
             opn_onl_backend::utils::rate_limiter::RateLimiters::new(),
         ),
         require_email_verification,
+        files,
+        drive: utils::drive::DrivePicker::from_env(),
+        embed_check: utils::media::OEmbedChecker::from_env(),
+        connector,
     };
 
     // Handles for the graceful-shutdown flush (so buffered clicks aren't lost on

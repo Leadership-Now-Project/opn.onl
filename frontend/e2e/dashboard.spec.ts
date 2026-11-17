@@ -282,8 +282,10 @@ test.describe('Dashboard Page', () => {
         await signIn(page, owner);
         await openDashboard(page);
         const toggle = page.getByRole('button', { name: 'Advanced options' });
+        // The title is part of the main form (it names the link in the list).
+        const title = page.getByLabel("Title (optional: the link's name in your list)");
+        await expect(title).toBeVisible();
         const fields = [
-            page.getByLabel('Title (private unless the link is on your bio page)'),
             page.getByLabel('Notes'),
             page.getByLabel('Password Protection'),
             page.getByLabel('Expiration', { exact: true }),

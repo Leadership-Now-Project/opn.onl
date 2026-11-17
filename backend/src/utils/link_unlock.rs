@@ -16,7 +16,7 @@ struct LinkUnlockClaims {
     password_fingerprint: String,
 }
 
-fn password_fingerprint(password_hash: &str) -> String {
+pub(crate) fn password_fingerprint(password_hash: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(password_hash.as_bytes()))
 }

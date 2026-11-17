@@ -2,8 +2,9 @@ use utoipa::{OpenApi, ToResponse, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers::{
-    admin, analytics, api_keys, auth, bio, contact, folders, links, organizations, passkeys,
-    reports, tags,
+    admin, analytics, api_keys, auth, bio, cf_access, connector_auth, contact, default_org, files,
+    folders, google_auth, links, organizations, passkeys, preview_image, reports, secure_view,
+    tags,
 };
 
 /// `info.description` of the served document (Markdown), set in [`api_doc`].
@@ -37,7 +38,8 @@ two headers, and a `RateLimitResponse` body.
 | Budget | Limit | Requests it covers |
 |---|---|---|
 | Burst | 20 per second | Every request except short-link visits (`/{code}`, `/{code}/preview`, \
-`/{code}/verify`, `GET /report`, `HEAD /report`), counted in addition to the request's own budget below |
+`/{code}/verify`, `/{code}/view`, `/{code}/view/file`, `GET /report`, `HEAD /report`), counted in \
+addition to the request's own budget below |
 | Sign-in | 10 per minute | Every `POST` under `/auth/` |
 | Link creation | 100 per hour | `POST /links` and `POST /links/{id}/clone`. `POST /links/bulk` \
 spends one per URL and lists the URLs past the budget in `errors` instead of answering 429 |
@@ -45,7 +47,10 @@ spends one per URL and lists the URLs past the budget in `errors` instead of ans
 | Reports | 5 per hour | `POST /report` |
 | Link password | 5 per minute per link, 20 per minute in total | `POST /{code}/verify`, and \
 `GET /{code}` with an `X-Link-Password` header |
-| Redirects | 100 per second | `GET /{code}`, `GET /{code}/preview`, and `GET` or `HEAD /report` |
+| Secure View | 10 per minute per link, 30 per minute in total | `POST /{code}/view` |
+| Media page | 120 per minute | `POST /{code}/media` |
+| Redirects | 100 per second | `GET /{code}`, `GET /{code}/preview`, `GET /{code}/view/file`, and \
+`GET` or `HEAD /report` |
 | General | 100 per minute | Every other request, including `GET`, `PUT`, and `DELETE` under \
 `/auth/` |
 
@@ -109,6 +114,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
     tags(
         (name = "Authentication", description = "User registration, login, and passkey management"),
         (name = "Links", description = "Create, manage, and redirect shortened URLs"),
+        (name = "Files", description = "Upload a file and share it as a short link. Only on an instance with file storage configured"),
         (name = "Analytics", description = "View click statistics and analytics"),
         (name = "Organizations", description = "Team and organization management"),
         (name = "Folders", description = "Organize links into folders"),
@@ -122,6 +128,10 @@ pub struct TooManyRequests(pub RateLimitResponse);
         // Authentication
         auth::register,
         auth::login,
+        cf_access::cf_access_login,
+        google_auth::google_login,
+        connector_auth::connector_google_login,
+        connector_auth::connector_session,
         auth::verify_email,
         auth::resend_verification,
         auth::forgot_password,
@@ -151,6 +161,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
         bio::update_bio_order,
         bio::get_public_bio,
         links::proxy_bio_avatar,
+        preview_image::preview_image,
 
         // Links
         links::create_link,
@@ -167,6 +178,13 @@ pub struct TooManyRequests(pub RateLimitResponse);
         links::bulk_update_links,
         links::export_links_csv,
         links::clone_link,
+        files::start_upload,
+        files::complete_upload,
+        files::get_usage,
+        secure_view::set_secure_view,
+        secure_view::open_view,
+        secure_view::view_file,
+        crate::handlers::media::open_media,
         links::toggle_pin,
         links::check_code_availability,
         links::check_url_health,
@@ -273,8 +291,15 @@ pub struct TooManyRequests(pub RateLimitResponse);
             auth::ChangePasswordResponse,
             auth::DeleteAccountRequest,
             auth::AuthResponse,
+            google_auth::GoogleLoginRequest,
+            connector_auth::ConnectorGoogleRequest,
+            connector_auth::ConnectorSessionRequest,
+            connector_auth::ConnectorSession,
             auth::MessageResponse,
             auth::AppSettingsResponse,
+            default_org::DefaultOrgInfo,
+            auth::FileSharingInfo,
+            auth::DrivePickerInfo,
             auth::UserProfileResponse,
             auth::UpdateProfileRequest,
 
@@ -312,6 +337,25 @@ pub struct TooManyRequests(pub RateLimitResponse);
             links::BulkUpdateRequest,
             links::LinksQuery,
             links::LinkResponse,
+            links::LinkFileInfo,
+            links::LinkDriveInfo,
+            crate::utils::drive::DriveFileRef,
+            links::LinkMediaInfo,
+            links::MediaRequest,
+            links::MediaCtaRequest,
+            crate::handlers::media::OpenMediaRequest,
+            crate::handlers::media::OpenMediaResponse,
+            crate::handlers::media::MediaCta,
+            crate::handlers::media::MediaEmbed,
+            files::StartUploadRequest,
+            files::StartUploadResponse,
+            files::CompleteUploadRequest,
+            files::FileUsageResponse,
+            secure_view::SetSecureViewRequest,
+            secure_view::OpenViewRequest,
+            secure_view::OpenViewResponse,
+            secure_view::ViewFile,
+            secure_view::ViewWatermark,
             links::CreateLinkResponse,
             links::BulkCreateLinkResponse,
             links::BulkCreateFailure,
@@ -322,6 +366,7 @@ pub struct TooManyRequests(pub RateLimitResponse);
             links::VerifyPasswordRequest,
             links::VerifyPasswordResponse,
             links::TagInfo,
+            links::LinkCreator,
             links::LinkPreviewResponse,
             links::ReputationInfo,
             links::CloneLinkResponse,

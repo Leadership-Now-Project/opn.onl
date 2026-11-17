@@ -13,6 +13,11 @@ interface LinkFiltersProps {
     orgs: OrgOption[];
     orgId: number | null;
     onOrgChange: (id: number | null) => void;
+    /**
+     * A member of the instance's shared organization has no personal list:
+     * the picker then offers only teams, and is hidden when there is one.
+     */
+    noPersonal?: boolean;
     folders: CatalogItem[];
     folderId: number | null;
     onFolderChange: (id: number | null) => void;
@@ -47,6 +52,7 @@ export default function LinkFilters({
     orgs,
     orgId,
     onOrgChange,
+    noPersonal = false,
     folders,
     folderId,
     onFolderChange,
@@ -58,7 +64,7 @@ export default function LinkFilters({
     onFolderDeleted,
     onTagDeleted,
 }: LinkFiltersProps) {
-    const showContext = orgs.length > 0 || orgId != null;
+    const showContext = noPersonal ? orgs.length > 1 : orgs.length > 0 || orgId != null;
     const knownOrg = orgId != null && orgs.some(org => org.id === orgId);
     const knownFolder = folderId != null && folders.some(folder => folder.id === folderId);
     const knownTag = tagId != null && tags.some(tag => tag.id === tagId);
@@ -106,7 +112,7 @@ export default function LinkFilters({
                         onChange={(event) => onOrgChange(event.target.value ? Number(event.target.value) : null)}
                         className={selectClass}
                     >
-                        <option value="">Personal</option>
+                        {!noPersonal && <option value="">Personal</option>}
                         {orgs.map(org => (
                             <option key={org.id} value={org.id}>{org.name}</option>
                         ))}

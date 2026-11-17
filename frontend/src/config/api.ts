@@ -2,6 +2,7 @@
 // In development, this uses localhost. In production, set VITE_API_URL environment variable.
 
 import { safeLocalStorage } from '../utils/storage';
+import { forgetDriveToken } from '../utils/driveToken';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
@@ -25,6 +26,9 @@ export const API_ENDPOINTS = {
     // Auth
     register: `${API_BASE_URL}/auth/register`,
     login: `${API_BASE_URL}/auth/login`,
+    // Sign-in with a Google authorization code; 404 unless /auth/settings
+    // carries a google_client_id.
+    googleLogin: `${API_BASE_URL}/auth/google`,
     verifyEmail: `${API_BASE_URL}/auth/verify-email`,
     resendVerification: `${API_BASE_URL}/auth/resend-verification`,
     forgotPassword: `${API_BASE_URL}/auth/forgot-password`,
@@ -63,6 +67,8 @@ export const API_ENDPOINTS = {
     buildUtm: `${API_BASE_URL}/links/build-utm`,
     sparklines: `${API_BASE_URL}/links/sparklines`,
     previewMetadata: `${API_BASE_URL}/links/preview-metadata`,
+    // A destination's preview image, fetched by the server (GET ?url=).
+    previewImage: `${API_BASE_URL}/links/preview-image`,
     linkStats: (id: number) => `${API_BASE_URL}/links/${id}/stats`,
     linkQr: (id: number, opts?: { color?: string; logo?: boolean; format?: 'png' | 'svg' }) => {
         const base = `${API_BASE_URL}/links/${id}/qr`;
@@ -80,6 +86,19 @@ export const API_ENDPOINTS = {
     linkTags: (id: number) => `${API_BASE_URL}/links/${id}/tags`,
     linkRules: (id: number) => `${API_BASE_URL}/links/${id}/rules`,
     linkRealtimeClicks: (id: number) => `${API_BASE_URL}/links/${id}/clicks/realtime`,
+
+    // File sharing. These answer 404 unless /auth/settings carries `files`.
+    fileUploads: `${API_BASE_URL}/files/uploads`,
+    fileUploadComplete: (uploadId: number) => `${API_BASE_URL}/files/uploads/${uploadId}/complete`,
+    fileUsage: `${API_BASE_URL}/files/usage`,
+    // Secure View: switch it on or off for a file link.
+    linkSecureView: (id: number) => `${API_BASE_URL}/links/${id}/secure-view`,
+    // Secure View's viewer page: trade the ticket and an email for a view
+    // token, then fetch the file with that token in a header.
+    viewOpen: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/view`,
+    viewFile: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/view/file`,
+    // A media link's page: trade the ticket for what the page shows.
+    mediaOpen: (code: string) => `${API_BASE_URL}/${encodeURIComponent(code)}/media`,
     
     // Analytics
     dashboardStats: `${API_BASE_URL}/analytics/dashboard`,
@@ -184,6 +203,7 @@ const handleUnauthorized = (requestToken: string | null) => {
 
     safeLocalStorage.removeItem('token');
     safeLocalStorage.removeItem('is_admin');
+    forgetDriveToken();
     // Redirect to login page
     window.location.href = '/login';
 };
@@ -271,6 +291,22 @@ export async function emailVerificationRequired(): Promise<boolean> {
     }
 }
 
+// The OAuth client id from GET /auth/settings when the instance signs people
+// in with Google, else null. A read that fails is null too: the pages that ask
+// then behave as on an instance without Google sign-in.
+export async function googleSignInClientId(): Promise<string | null> {
+    try {
+        const res = await fetch(API_ENDPOINTS.appSettings);
+        if (!res.ok) return null;
+        const settings = await res.json();
+        return typeof settings?.google_client_id === 'string' && settings.google_client_id
+            ? settings.google_client_id
+            : null;
+    } catch {
+        return null;
+    }
+}
+
 // Helper for API calls with error handling
 export async function apiCall<T>(
     url: string,
@@ -335,6 +371,21 @@ export interface BuildUtmResponse {
     original_url: string;
     url_with_utm: string;
     utm_params: Record<string, string>;
+}
+
+/** POST /files/uploads: where the browser sends the file, and the headers that request needs. */
+export interface StartUploadResponse {
+    upload_id: number;
+    upload_url: string;
+    required_headers: Record<string, string>;
+    expires_at: string;
+}
+
+/** GET /files/usage: the storage the caller's own uploads take. */
+export interface FileUsage {
+    bytes_used: number;
+    file_count: number;
+    max_file_bytes: number;
 }
 
 export interface Link {
@@ -486,6 +537,8 @@ export interface RecentClick {
     browser?: string;
     os?: string;
     referer?: string;
+    /** The email a Secure View visitor gave. Only sent to the link's creator and its organization's admins. */
+    viewer_email?: string;
 }
 
 export interface GeoPoint {

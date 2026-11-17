@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Plus, ChevronDown, Lock, Calendar, Flame, ShieldCheck, MousePointer } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { API_ENDPOINTS, SessionExpiredError, authFetch, responseError, type CheckCodeResponse } from '../../config/api';
+import { API_ENDPOINTS, SessionExpiredError, authFetch, responseError } from '../../config/api';
 import logger from '../../utils/logger';
 import { savePendingUrl } from '../../utils/pendingUrl';
+import { destinationProblem } from '../../utils/destination';
 import { localIsoDate } from '../../utils/localIsoDate';
 import type { AppSettings } from './types';
 import { swatchColor, type CatalogItem } from './linkScope';
@@ -11,16 +12,18 @@ import CharCount from './CharCount';
 import UtmBuilder from './UtmBuilder';
 import { DestinationCheckButton, DestinationStatus } from './DestinationCheck';
 import { useDestinationCheck } from './useDestinationCheck';
+import QuickAddCatalog from './QuickAddCatalog';
+import AliasField from './AliasField';
+import { aliasProblem } from './aliasCheck';
+import LinkPreviewCard from '../LinkPreviewCard';
 import {
     CLICK_LIMIT_ERROR,
     CLICK_LIMIT_HINT,
     MAX_NOTES_CHARS,
     START_BEFORE_EXPIRY,
-    aliasHintFrom,
     burnCapHint,
     datetimeLocalToUtc,
     parseClickLimit,
-    type AliasHint,
 } from './linkFields';
 
 interface CreateLinkFormProps {
@@ -35,10 +38,8 @@ interface CreateLinkFormProps {
     /** Set while a team's links are open. The new link is created in that team. */
     orgId?: number | null;
     orgName?: string | null;
-}
-
-function isAbort(error: unknown): boolean {
-    return typeof error === 'object' && error !== null && 'name' in error && (error as { name: unknown }).name === 'AbortError';
+    /** A folder or tag was created from this form: reload that list. */
+    onCatalogChanged?: (kind: 'folder' | 'tag') => void;
 }
 
 const fieldClass = 'w-full rounded-lg border border-line2 bg-surface px-4 py-2 text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint';
@@ -55,10 +56,10 @@ export default function CreateLinkForm({
     tags = [],
     orgId = null,
     orgName = null,
+    onCatalogChanged,
 }: CreateLinkFormProps) {
     const [newUrl, setNewUrl] = useState(initialUrl);
     const [alias, setAlias] = useState('');
-    const [aliasHint, setAliasHint] = useState<AliasHint | null>(null);
     const [title, setTitle] = useState('');
     const [notes, setNotes] = useState('');
     const [password, setPassword] = useState('');
@@ -87,48 +88,6 @@ export default function CreateLinkForm({
         setTagIds([]);
     }, [orgId]);
 
-    // Below the configured minimum the server only repeats the length rule,
-    // so the form waits until the alias could actually be free or taken.
-    useEffect(() => {
-        if (!appSettings.custom_aliases_enabled) return;
-        const code = alias;
-        if (code.length < appSettings.min_alias_length) {
-            setAliasHint(null);
-            return;
-        }
-        // Drop the previous answer immediately so a slow response cannot sit
-        // under an alias it was not about.
-        setAliasHint(null);
-        const controller = new AbortController();
-        let ignore = false;
-        const timer = window.setTimeout(async () => {
-            try {
-                const res = await authFetch(`${API_ENDPOINTS.checkCode}?${new URLSearchParams({ code })}`, {
-                    signal: controller.signal,
-                });
-                if (ignore) return;
-                if (!res.ok) {
-                    // A 429 here says how long to wait; anything else that
-                    // failed is still worth a word rather than a silent blank.
-                    const text = await responseError(res, 'Could not check this alias');
-                    if (!ignore) setAliasHint({ text, ok: false });
-                    return;
-                }
-                const data = await res.json() as CheckCodeResponse;
-                if (ignore || data.code !== code) return;
-                setAliasHint(aliasHintFrom(data));
-            } catch (error) {
-                if (ignore || isAbort(error)) return;
-                setAliasHint(null);
-            }
-        }, 300);
-        return () => {
-            ignore = true;
-            window.clearTimeout(timer);
-            controller.abort();
-        };
-    }, [alias, appSettings.custom_aliases_enabled, appSettings.min_alias_length]);
-
     // Clipboard is read only from this click. A mount or focus listener prompts
     // (or, in some browsers, reads) without the user asking.
     const pasteClipboardUrl = async () => {
@@ -150,30 +109,21 @@ export default function CreateLinkForm({
         setCreating(true);
         onError('');
 
-        // Validate alias length if provided
-        if (alias) {
-            if (alias.length < appSettings.min_alias_length) {
-                onError(`Alias must be at least ${appSettings.min_alias_length} characters`);
-                setCreating(false);
-                return;
-            }
-            if (alias.length > appSettings.max_alias_length) {
-                onError(`Alias must be at most ${appSettings.max_alias_length} characters`);
-                setCreating(false);
-                return;
-            }
-            // Check for valid characters
-            if (!/^[a-zA-Z0-9_-]+$/.test(alias)) {
-                onError('Alias can only contain letters, numbers, hyphens, and underscores');
-                setCreating(false);
-                return;
-            }
-            // Check for leading/trailing special chars
-            if (/^[-_]|[-_]$/.test(alias)) {
-                onError('Alias cannot start or end with hyphen or underscore');
-                setCreating(false);
-                return;
-            }
+        // Length, characters and the leading or trailing hyphen rule.
+        const badAlias = aliasProblem(alias, appSettings);
+        if (badAlias) {
+            onError(badAlias);
+            setCreating(false);
+            return;
+        }
+
+        // `https:example.com` is nearly always a slip. The server would store
+        // it as `https://example.com/`; here the person is asked to look again.
+        const badDestination = destinationProblem(newUrl);
+        if (badDestination) {
+            onError(badDestination);
+            setCreating(false);
+            return;
         }
 
         // Burn is stored as a one-click cap when no cap is sent. A number here
@@ -273,32 +223,42 @@ export default function CreateLinkForm({
     const limitHint = burnAfterReading ? burnCapHint(1) : CLICK_LIMIT_HINT;
 
     return (
-        <div className="rounded-2xl border border-line2 bg-surface p-6 shadow-subtle mb-8">
-            <h2 className="font-display text-lg font-bold text-ink tracking-tight mb-4">Create new link</h2>
+        // The card around this form, its heading and its tabs are CreateCard's.
+        // The card is a third of the page from `lg` up, so the paired fields
+        // go back to one column there until the page is wide enough for two.
+        <div>
             {orgId != null && orgName && (
                 <p className="mb-4 text-sm text-muted">Creating in {orgName}</p>
             )}
             <form onSubmit={handleCreate}>
-                {/* The controls sit beside the destination only from lg up.
-                    Narrower, the destination takes a line of its own and the
-                    controls share the next; on one line it was squeezed to a
-                    few characters. The check's answer goes under the row for
-                    the same reason: it can be a long sentence. */}
-                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
-                    <label htmlFor="create-url" className="sr-only">Destination URL</label>
+                {/* Read top to bottom: the short link, where it leads, then
+                    the two actions. The check's answer and a preview of the
+                    destination go under the actions. */}
+                {appSettings.custom_aliases_enabled && (
+                    <>
+                        <AliasField
+                            idPrefix="create"
+                            alias={alias}
+                            onChange={setAlias}
+                            settings={appSettings}
+                            labelClass={labelClass}
+                        />
+                        <p className="my-3 text-sm text-muted">leads to…</p>
+                    </>
+                )}
+
+                <p id="create-url-label" className={labelClass}>Destination (where you want the link to go)</p>
+                <div className="flex gap-3">
                     <input
                         id="create-url"
                         type="url"
                         required
+                        aria-label="Destination URL"
+                        aria-describedby="create-url-label"
                         placeholder="https://example.com/long-url"
-                        className="min-w-0 w-full sm:basis-full lg:flex-1 lg:min-w-[16rem] rounded-lg border border-line2 bg-surface px-4 py-2.5 font-mono text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint"
+                        className="min-w-0 flex-1 rounded-lg border border-line2 bg-surface px-4 py-2.5 font-mono text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint"
                         value={newUrl}
                         onChange={(e) => setNewUrl(e.target.value)}
-                    />
-                    <DestinationCheckButton
-                        pending={destination.pending}
-                        disabled={!newUrl.trim()}
-                        onClick={() => void destination.check()}
                     />
                     <button
                         type="button"
@@ -307,26 +267,36 @@ export default function CreateLinkForm({
                     >
                         Paste
                     </button>
-                    {appSettings.custom_aliases_enabled && (
-                        <>
-                            <label htmlFor="create-alias" className="sr-only">Custom alias</label>
-                            <input
-                                id="create-alias"
-                                type="text"
-                                placeholder={`alias (${appSettings.min_alias_length}-${appSettings.max_alias_length} chars)`}
-                                aria-describedby={aliasHint ? 'create-alias-hint' : undefined}
-                                className="min-w-0 w-full sm:w-auto sm:flex-1 lg:w-48 lg:flex-none rounded-lg border border-line2 bg-surface px-4 py-2.5 font-mono text-sm text-ink outline-none transition-colors focus:border-primary-500 placeholder:text-faint"
-                                value={alias}
-                                onChange={(e) => setAlias(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))}
-                                minLength={appSettings.min_alias_length}
-                                maxLength={appSettings.max_alias_length}
-                            />
-                        </>
-                    )}
+                </div>
+
+                <div className="mt-4">
+                    <label htmlFor="create-title" className={labelClass}>
+                        Title (optional: the link's name in your list)
+                    </label>
+                    <input
+                        id="create-title"
+                        type="text"
+                        placeholder="e.g. Business Plan for America"
+                        className={fieldClass}
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        maxLength={100}
+                    />
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                    <DestinationCheckButton
+                        pending={destination.pending}
+                        disabled={!newUrl.trim()}
+                        onClick={() => void destination.check()}
+                        className="py-2.5"
+                    />
                     <button
                         type="submit"
                         disabled={creating}
-                        className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-primary-600 px-6 py-2.5 font-semibold text-white transition-colors hover:bg-primary-700 disabled:opacity-70"
+                        // `ml-auto`: when the card is too narrow for both
+                        // buttons, Create wraps and stays at the right end.
+                        className="ml-auto inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-primary-600 px-6 py-2.5 font-semibold text-white transition-colors hover:bg-primary-700 disabled:opacity-70"
                     >
                         {creating ? (
                             <div className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
@@ -337,18 +307,10 @@ export default function CreateLinkForm({
                     </button>
                 </div>
                 {destination.status && (
-                    <div className="mt-2">
+                    <div className="mt-3 space-y-2">
                         <DestinationStatus status={destination.status} />
+                        <LinkPreviewCard url={newUrl.trim()} className="max-w-md" />
                     </div>
-                )}
-                {aliasHint && (
-                    <p
-                        id="create-alias-hint"
-                        role="status"
-                        className={`mt-2 text-xs ${aliasHint.ok ? 'text-success' : 'text-danger'}`}
-                    >
-                        {aliasHint.text}
-                    </p>
                 )}
 
                 <button
@@ -370,22 +332,6 @@ export default function CreateLinkForm({
                             className="overflow-hidden"
                         >
                             <div className="space-y-4 mt-4 pt-4 border-t border-line">
-                                {/* Title - full width */}
-                                <div>
-                                    <label htmlFor="create-title" className={labelClass}>
-                                        Title (private unless the link is on your bio page)
-                                    </label>
-                                    <input
-                                        id="create-title"
-                                        type="text"
-                                        placeholder="e.g. Marketing campaign Q1"
-                                        className={fieldClass}
-                                        value={title}
-                                        onChange={(e) => setTitle(e.target.value)}
-                                        maxLength={100}
-                                    />
-                                </div>
-
                                 <div>
                                     <label htmlFor="create-notes" className={labelClass}>Notes</label>
                                     <textarea
@@ -400,7 +346,7 @@ export default function CreateLinkForm({
                                     <CharCount length={notes.length} max={MAX_NOTES_CHARS} />
                                 </div>
 
-                                <div className="grid sm:grid-cols-2 gap-4">
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-1 min-[1800px]:grid-cols-2 gap-4">
                                     <div>
                                         <label htmlFor="create-folder" className={labelClass}>Folder</label>
                                         <select
@@ -414,11 +360,19 @@ export default function CreateLinkForm({
                                                 <option key={folder.id} value={folder.id}>{folder.name}</option>
                                             ))}
                                         </select>
+                                        <QuickAddCatalog
+                                            kind="folder"
+                                            orgId={orgId}
+                                            onAdded={(folder) => {
+                                                onCatalogChanged?.('folder');
+                                                setFolderId(String(folder.id));
+                                            }}
+                                        />
                                     </div>
                                     <fieldset>
                                         <legend className={labelClass}>Tags</legend>
                                         {tags.length === 0 ? (
-                                            <p className="text-sm text-muted">No tags yet</p>
+                                            <p className="text-sm text-muted">No tags yet: add one below.</p>
                                         ) : (
                                             <div className="flex flex-wrap gap-2">
                                                 {tags.map(tag => {
@@ -446,10 +400,18 @@ export default function CreateLinkForm({
                                                 })}
                                             </div>
                                         )}
+                                        <QuickAddCatalog
+                                            kind="tag"
+                                            orgId={orgId}
+                                            onAdded={(tag) => {
+                                                onCatalogChanged?.('tag');
+                                                setTagIds(current => [...current, tag.id]);
+                                            }}
+                                        />
                                     </fieldset>
                                 </div>
 
-                                <div className="grid sm:grid-cols-2 gap-4">
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-1 min-[1800px]:grid-cols-2 gap-4">
                                     <div>
                                         <label htmlFor="create-password" className={iconLabelClass}>
                                             <Lock className="h-3.5 w-3.5" />
@@ -497,7 +459,7 @@ export default function CreateLinkForm({
                                     </div>
                                 </div>
 
-                                <div className="grid sm:grid-cols-2 gap-4">
+                                <div className="grid sm:grid-cols-2 lg:grid-cols-1 min-[1800px]:grid-cols-2 gap-4">
                                     <div>
                                         <label htmlFor="create-starts" className={iconLabelClass}>
                                             <Calendar className="h-3.5 w-3.5" />

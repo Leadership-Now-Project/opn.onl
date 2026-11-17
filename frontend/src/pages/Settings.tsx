@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { motion } from 'framer-motion';
 import {
     Key, Shield, Download, Trash2,
@@ -12,6 +13,7 @@ import BioSettingsSection from './BioSettingsSection';
 import logger from '../utils/logger';
 import { formatDate, isSafeHttpUrl } from '../utils';
 import { safeLocalStorage } from '../utils/storage';
+import { forgetDriveToken } from '../utils/driveToken';
 
 interface Passkey {
     id: number;
@@ -375,7 +377,9 @@ export default function Settings() {
             }
 
             safeLocalStorage.removeItem('token');
-            navigate('/');
+            forgetDriveToken();
+            if (IS_LNP) window.location.assign('/');
+            else navigate('/');
         } catch (err) {
             setError(errorMessage(err));
         } finally {

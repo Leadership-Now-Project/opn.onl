@@ -72,6 +72,8 @@ interface RecentClick {
     browser: string | null;
     os: string | null;
     referer: string | null;
+    /** The email a Secure View visitor gave. Sent only to the link's creator and its organization's admins. */
+    viewer_email?: string | null;
 }
 
 interface LinkStats {
@@ -441,7 +443,11 @@ export default function Analytics() {
             </motion.div>
 
             {/* Recent Clicks */}
-            {stats.recent_clicks.length > 0 && (
+            {stats.recent_clicks.length > 0 && (() => {
+                // Only a Secure View link has these, and the API sends them
+                // only to the link's creator and its organization's admins.
+                const showViewers = stats.recent_clicks.some(click => click.viewer_email);
+                return (
                 <motion.div
                     initial={{ opacity: 0, y: 12 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -456,6 +462,9 @@ export default function Analytics() {
                             <thead>
                                 <tr className="border-b border-line">
                                     <th className="text-left px-6 py-3 font-mono text-xs font-medium uppercase tracking-[0.12em] text-faint">Time</th>
+                                    {showViewers && (
+                                        <th className="text-left px-6 py-3 font-mono text-xs font-medium uppercase tracking-[0.12em] text-faint">Viewer email</th>
+                                    )}
                                     <th className="text-left px-6 py-3 font-mono text-xs font-medium uppercase tracking-[0.12em] text-faint">Location</th>
                                     <th className="text-left px-6 py-3 font-mono text-xs font-medium uppercase tracking-[0.12em] text-faint">Device</th>
                                     <th className="text-left px-6 py-3 font-mono text-xs font-medium uppercase tracking-[0.12em] text-faint">Browser</th>
@@ -463,11 +472,18 @@ export default function Analytics() {
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-line">
-                                {stats.recent_clicks.slice(0, 20).map((click) => (
+                                {/* With viewer emails, every click the API sent (its latest 100):
+                                    the list is then the record of who opened the document. */}
+                                {stats.recent_clicks.slice(0, showViewers ? stats.recent_clicks.length : 20).map((click) => (
                                     <tr key={click.id} className="transition-colors hover:bg-primary-50/40">
                                         <td className="px-6 py-4 text-sm text-muted whitespace-nowrap">
                                             {new Date(click.timestamp).toLocaleString()}
                                         </td>
+                                        {showViewers && (
+                                            <td className="px-6 py-4 max-w-xs truncate text-sm text-ink" title={click.viewer_email ?? undefined}>
+                                                {click.viewer_email || '—'}
+                                            </td>
+                                        )}
                                         <td className="px-6 py-4 text-sm text-ink">
                                             {click.city && click.country
                                                 ? `${click.city}, ${click.country}`
@@ -487,8 +503,14 @@ export default function Analytics() {
                             </tbody>
                         </table>
                     </div>
+                    {showViewers && (
+                        <p className="border-t border-line px-6 py-3 text-xs text-faint">
+                            Viewer emails are what each person typed to open the document. They are not verified, and only you and your organization's admins see them.
+                        </p>
+                    )}
                 </motion.div>
-            )}
+                );
+            })()}
 
             {/* No data message */}
             {stats.total_clicks === 0 && (

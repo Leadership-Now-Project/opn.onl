@@ -2,13 +2,16 @@ import type { Ref } from 'react';
 import { Link } from 'react-router-dom';
 import {
     Copy, Trash2, BarChart2, QrCode, Lock, Clock, Edit2, Check,
-    Link2, Share2, Pin, CopyPlus, Eye,
+    Link2, Share2, Pin, CopyPlus, Eye, FileText, FileLock2, CirclePlay,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { shortLinkBase } from '../../config/api';
 import Sparkline from '../Sparkline';
+import DriveMark from './DriveMark';
 import MiniStats from './MiniStats';
 import { pluralize } from '../../utils/plural';
+import { formatBytes } from '../../utils/fileSize';
+import { providerName } from '../../utils/media';
 import { swatchColor } from './linkScope';
 import { clickCapReached, clickLimitLabel, formatBadgeDay, rowStatus } from './linkStatus';
 import type { LinkData, SparklineSeries } from './types';
@@ -37,6 +40,8 @@ interface LinkRowProps {
     folder?: { name: string; color?: string | null } | null;
     /** A team viewer's row: no selection, pin, clone, edit or delete, which the API refuses them. */
     readOnly?: boolean;
+    /** Name who created the link (a list of everyone's links). */
+    showCreator?: boolean;
     // AnimatePresence mode="popLayout" measures the row by cloning it with a ref.
     ref?: Ref<HTMLDivElement>;
 }
@@ -62,6 +67,7 @@ export default function LinkRow({
     onDelete,
     folder = null,
     readOnly = false,
+    showCreator = false,
     ref,
 }: LinkRowProps) {
     const mainUrl = `${shortLinkBase()}/${link.code}`;
@@ -70,6 +76,10 @@ export default function LinkRow({
     const status = rowStatus(link);
     const reason = status.badge;
     const capReached = clickCapReached(link);
+    const creator = showCreator ? link.created_by ?? null : null;
+    // An editor may change a colleague's link but not delete it: the list
+    // says so, and the button the API would refuse is not offered.
+    const canDelete = link.can_delete !== false;
 
     const neutralBadge = 'inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 text-xs font-medium text-muted';
     const dangerBadge = 'inline-flex items-center gap-1 rounded border border-danger/30 bg-danger/5 px-2 py-0.5 text-xs font-medium text-danger';
@@ -95,7 +105,8 @@ export default function LinkRow({
                 )}
                 <div className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-start justify-between gap-4">
                     <div className="space-y-1 min-w-0 flex-1">
-                        {/* Link number and title */}
+                        {/* Link number and title. A title is the link's headline
+                            (bit.ly style); without one the short URL is. */}
                         <div className="flex items-center gap-2 mb-1">
                             <span className="font-mono text-xs font-semibold text-faint">
                                 #{linkNumber}
@@ -104,7 +115,7 @@ export default function LinkRow({
                                 <Pin className="h-3 w-3 text-primary-600 fill-current" aria-label="Pinned" />
                             )}
                             {link.title && (
-                                <span className="text-sm font-medium text-ink truncate">
+                                <span className="font-display text-lg font-bold text-ink truncate">
                                     {link.title}
                                 </span>
                             )}
@@ -116,7 +127,7 @@ export default function LinkRow({
                                 href={mainUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="font-mono text-lg font-bold text-primary-600 hover:underline"
+                                className={`font-mono font-bold text-primary-600 hover:underline ${link.title ? 'text-sm' : 'text-lg'}`}
                             >
                                 {mainUrl.replace(/^https?:\/\//, '')}
                             </a>
@@ -133,27 +144,79 @@ export default function LinkRow({
                                 )}
                             </button>
                             <span className="text-faint" aria-hidden="true">→</span>
-                            <a
-                                href={link.original_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="truncate max-w-[300px] font-mono text-sm text-muted transition-colors hover:text-ink hover:underline"
-                                title={link.original_url}
-                            >
-                                {link.original_url.replace(/^https?:\/\//, '').substring(0, 50)}{link.original_url.length > 60 ? '...' : ''}
-                            </a>
-                            <button
-                                onClick={() => onCopySource(link)}
-                                className="rounded p-1 text-faint transition-colors hover:bg-line hover:text-ink"
-                                title="Copy source URL"
-                                aria-label={`Copy source URL for ${link.code}`}
-                            >
-                                {sourceCopied ? (
-                                    <Check className="h-4 w-4 text-success" />
-                                ) : (
-                                    <Link2 className="h-4 w-4" />
-                                )}
-                            </button>
+                            {link.file ? (
+                                // A file link has no destination URL: it
+                                // serves the uploaded file.
+                                <span
+                                    className="inline-flex min-w-0 max-w-[300px] items-center gap-1.5 text-sm text-muted"
+                                    title={link.file.filename}
+                                    data-file-link={link.id}
+                                >
+                                    <FileText className="h-4 w-4 shrink-0 text-primary-600" aria-label="File" />
+                                    <span className="truncate font-medium text-ink">{link.file.filename}</span>
+                                    <span className="shrink-0 text-xs text-faint">{formatBytes(link.file.size_bytes)}</span>
+                                </span>
+                            ) : (
+                                <>
+                                    {link.drive ? (
+                                        // Made for a file in Google Drive:
+                                        // the file's name, linked to where
+                                        // it lives in Drive.
+                                        <a
+                                            href={link.original_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="inline-flex min-w-0 max-w-[300px] items-center gap-1.5 text-sm text-muted transition-colors hover:text-ink hover:underline"
+                                            title={`${link.drive.name} (Google Drive)`}
+                                            data-drive-link={link.id}
+                                        >
+                                            <DriveMark size={16} label="Google Drive file" />
+                                            <span className="truncate font-medium text-ink">{link.drive.name}</span>
+                                        </a>
+                                    ) : (
+                                        <a
+                                            href={link.original_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="truncate max-w-[300px] font-mono text-sm text-muted transition-colors hover:text-ink hover:underline"
+                                            title={link.original_url}
+                                        >
+                                            {link.original_url.replace(/^https?:\/\//, '').substring(0, 50)}{link.original_url.length > 60 ? '...' : ''}
+                                        </a>
+                                    )}
+                                    <button
+                                        onClick={() => onCopySource(link)}
+                                        className="rounded p-1 text-faint transition-colors hover:bg-line hover:text-ink"
+                                        title="Copy source URL"
+                                        aria-label={`Copy source URL for ${link.code}`}
+                                    >
+                                        {sourceCopied ? (
+                                            <Check className="h-4 w-4 text-success" />
+                                        ) : (
+                                            <Link2 className="h-4 w-4" />
+                                        )}
+                                    </button>
+                                </>
+                            )}
+                            {link.media && (
+                                <span
+                                    className={neutralBadge}
+                                    title="Opens a page with the video's player on it, not the video's own site."
+                                    data-media-link={link.id}
+                                >
+                                    <CirclePlay className="h-3 w-3" aria-hidden="true" />
+                                    {providerName(link.media.provider)} video
+                                </span>
+                            )}
+                            {link.file?.secure_view && (
+                                <span
+                                    className={neutralBadge}
+                                    title="Opens in a viewer that asks for an email. The file is not handed over."
+                                >
+                                    <FileLock2 className="h-3 w-3" />
+                                    Secure View
+                                </span>
+                            )}
                             {link.has_password && (
                                 <span className={neutralBadge}>
                                     <Lock className="h-3 w-3" />
@@ -187,6 +250,11 @@ export default function LinkRow({
                                 </span>
                             )}
                         </div>
+                        {creator && (
+                            <p className="text-xs text-muted" title={creator.email}>
+                                Created by <span className="font-medium text-ink">{creator.name || creator.email}</span>
+                            </p>
+                        )}
                         {/* API URL */}
                         <p className="font-mono text-xs text-faint">
                             API: <a href={apiUrl} target="_blank" rel="noreferrer" className="underline decoration-line2 underline-offset-2 hover:text-muted hover:decoration-current">{apiUrl}</a>
@@ -237,14 +305,17 @@ export default function LinkRow({
                             </span>
                         </Link>
                         <div className="flex items-center gap-0.5">
-                            <button
-                                onClick={() => onPreview(link)}
-                                className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink"
-                                title="Preview destination"
-                                aria-label={`Preview destination for ${link.code}`}
-                            >
-                                <Eye className="h-4 w-4" />
-                            </button>
+                            {/* A file link has no page to preview. */}
+                            {!link.file && (
+                                <button
+                                    onClick={() => onPreview(link)}
+                                    className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink"
+                                    title="Preview destination"
+                                    aria-label={`Preview destination for ${link.code}`}
+                                >
+                                    <Eye className="h-4 w-4" />
+                                </button>
+                            )}
                             {!readOnly && (
                                 <>
                                     <button
@@ -255,15 +326,18 @@ export default function LinkRow({
                                     >
                                         <Pin className={`h-4 w-4 ${link.is_pinned ? 'fill-current' : ''}`} />
                                     </button>
-                                    <button
-                                        onClick={() => onClone(link)}
-                                        disabled={cloning}
-                                        className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink disabled:cursor-wait disabled:opacity-50"
-                                        title="Clone"
-                                        aria-label={`Clone link ${link.code}`}
-                                    >
-                                        <CopyPlus className="h-4 w-4" />
-                                    </button>
+                                    {/* One file, one link: the API refuses to clone a file link. */}
+                                    {!link.file && (
+                                        <button
+                                            onClick={() => onClone(link)}
+                                            disabled={cloning}
+                                            className="rounded-md p-2 text-faint transition-colors hover:bg-line hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                                            title="Clone"
+                                            aria-label={`Clone link ${link.code}`}
+                                        >
+                                            <CopyPlus className="h-4 w-4" />
+                                        </button>
+                                    )}
                                 </>
                             )}
                             <button
@@ -293,14 +367,16 @@ export default function LinkRow({
                                     >
                                         <Edit2 className="h-4 w-4" />
                                     </button>
-                                    <button
-                                        onClick={() => onDelete(link.id)}
-                                        className="rounded-md p-2 text-faint transition-colors hover:bg-danger/5 hover:text-danger"
-                                        title="Delete"
-                                        aria-label={`Delete link ${link.code}`}
-                                    >
-                                        <Trash2 className="h-4 w-4" />
-                                    </button>
+                                    {canDelete && (
+                                        <button
+                                            onClick={() => onDelete(link.id)}
+                                            className="rounded-md p-2 text-faint transition-colors hover:bg-danger/5 hover:text-danger"
+                                            title="Delete"
+                                            aria-label={`Delete link ${link.code}`}
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                        </button>
+                                    )}
                                 </>
                             )}
                         </div>

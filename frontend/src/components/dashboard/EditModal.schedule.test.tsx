@@ -173,7 +173,7 @@ describe('EditModal schedule, notes and click limit', () => {
             fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: 'https://example.com/next' } });
             fireEvent.click(screen.getByRole('button', { name: 'Check destination' }));
 
-            expect(await screen.findByRole('status')).toHaveTextContent('Reachable · HTTP 200');
+            expect(await screen.findByRole('status')).toHaveTextContent('Page found (HTTP 200)');
             const [endpoint, init] = vi.mocked(fetch).mock.calls[0];
             expect(String(endpoint)).toMatch(/\/links\/health-check$/);
             expect(init?.method).toBe('POST');

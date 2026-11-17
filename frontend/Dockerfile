@@ -3,6 +3,8 @@
 FROM nginx:alpine AS csp-config
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Per-deployment locations are mounted here; empty in the stock image.
+RUN mkdir -p /etc/nginx/site.d
 
 # Bake the API origin into the CSP connect-src. The frontend fetches the API
 # cross-origin (VITE_API_URL, e.g. https://l.opn.onl), so the document CSP must
@@ -33,6 +35,161 @@ RUN set -e; \
         exit 1; \
     fi; \
     echo "CSP connect-src extra sources: '${CONNECT_SRC}'"
+
+# Google sign-in on the login page (src/pages/Login.tsx) needs Google Identity
+# Services in the CSP: its script, the endpoints that script calls, its frames
+# and its stylesheet. Only a deployment that signs people in with Google sets
+# CSP_GOOGLE_SIGN_IN=true; without it every placeholder becomes nothing and the
+# policy is exactly the stock one. Each placeholder sits directly before its
+# `;` in nginx.conf, so the leading space belongs to the value. Same guards as
+# above: fail if a placeholder is missing before or left over after.
+#
+# A policy can have one frame-src directive only (a second one is ignored), so
+# this step also decides where the media page's players go, further down
+# (CSP_MEDIA_EMBEDS): with Google sign-in they join its frame-src
+# (__CSP_MEDIA_SOURCES__), without it they get a frame-src of their own
+# (__CSP_MEDIA_DIRECTIVE__). Either marker becomes nothing unless
+# CSP_MEDIA_EMBEDS=true.
+ARG CSP_GOOGLE_SIGN_IN
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    for NAME in SCRIPT STYLE CONNECT FRAME; do \
+        if ! grep -q "__CSP_GOOGLE_${NAME}__" "$CONF"; then \
+            echo "ERROR: __CSP_GOOGLE_${NAME}__ placeholder not found in nginx.conf"; \
+            exit 1; \
+        fi; \
+    done; \
+    if [ "$CSP_GOOGLE_SIGN_IN" = "true" ]; then \
+        G_SCRIPT=" https://accounts.google.com/gsi/client"; \
+        G_STYLE=" https://accounts.google.com/gsi/style"; \
+        G_CONNECT=" https://accounts.google.com/gsi/"; \
+        G_FRAME=" frame-src https://accounts.google.com/gsi/__CSP_DRIVE_FRAME____CSP_MEDIA_SOURCES__;"; \
+    elif [ -z "$CSP_GOOGLE_SIGN_IN" ] || [ "$CSP_GOOGLE_SIGN_IN" = "false" ]; then \
+        G_SCRIPT=""; G_STYLE=""; G_CONNECT=""; G_FRAME="__CSP_MEDIA_DIRECTIVE__"; \
+    else \
+        echo "ERROR: CSP_GOOGLE_SIGN_IN must be true, false or unset, not '$CSP_GOOGLE_SIGN_IN'"; \
+        exit 1; \
+    fi; \
+    sed -i \
+        -e "s#__CSP_GOOGLE_SCRIPT__#${G_SCRIPT}#g" \
+        -e "s#__CSP_GOOGLE_STYLE__#${G_STYLE}#g" \
+        -e "s#__CSP_GOOGLE_CONNECT__#${G_CONNECT}#g" \
+        -e "s#__CSP_GOOGLE_FRAME__#${G_FRAME}#g" \
+        "$CONF"; \
+    if grep -q '__CSP_GOOGLE_' "$CONF"; then \
+        echo "ERROR: a __CSP_GOOGLE_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP Google sign-in sources: '${G_SCRIPT}'"
+
+# File sharing (the dashboard's Files tab) uploads straight from the browser to
+# the storage bucket, so the page's connect-src must name the bucket's origin,
+# e.g. https://my-bucket.s3.us-east-2.amazonaws.com. Only a dashboard image for
+# a deployment with file sharing sets CSP_FILES_UPLOAD_ORIGIN; without it the
+# placeholder becomes nothing and the policy is exactly the stock one. The
+# value is written into a header, so anything but a bare https origin is
+# refused: a space or a semicolon in it would add sources or whole directives.
+ARG CSP_FILES_UPLOAD_ORIGIN
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    if ! grep -q '__CSP_FILES_CONNECT__' "$CONF"; then \
+        echo "ERROR: __CSP_FILES_CONNECT__ placeholder not found in nginx.conf"; \
+        exit 1; \
+    fi; \
+    if [ -z "$CSP_FILES_UPLOAD_ORIGIN" ]; then \
+        F_CONNECT=""; \
+    elif printf '%s' "$CSP_FILES_UPLOAD_ORIGIN" | grep -Eq '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$'; then \
+        F_CONNECT=" $CSP_FILES_UPLOAD_ORIGIN"; \
+    else \
+        echo "ERROR: CSP_FILES_UPLOAD_ORIGIN must be an https origin such as https://bucket.s3.us-east-2.amazonaws.com, not '$CSP_FILES_UPLOAD_ORIGIN'"; \
+        exit 1; \
+    fi; \
+    sed -i "s#__CSP_FILES_CONNECT__#${F_CONNECT}#g" "$CONF"; \
+    if grep -q '__CSP_FILES_' "$CONF"; then \
+        echo "ERROR: a __CSP_FILES_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP file upload origin: '${F_CONNECT}'"
+
+# "Google Drive Files" on the dashboard's Files tab (src/utils/googleDrive.ts)
+# opens Google's file picker and asks the Drive API about the file picked:
+# the API loader script and the picker module it fetches (apis.google.com),
+# the picker's frame (docs.google.com/picker) and the Drive API itself
+# (www.googleapis.com). Only a dashboard image for a deployment with the picker
+# sets CSP_GOOGLE_DRIVE_PICKER=true; without it every placeholder becomes
+# nothing and the policy is exactly what it was. The picker is used with the
+# Google sign-in above, whose frame-src directive it adds its frame to, so
+# turning it on without CSP_GOOGLE_SIGN_IN=true does not build.
+ARG CSP_GOOGLE_DRIVE_PICKER
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    for NAME in SCRIPT CONNECT; do \
+        if ! grep -q "__CSP_DRIVE_${NAME}__" "$CONF"; then \
+            echo "ERROR: __CSP_DRIVE_${NAME}__ placeholder not found in nginx.conf"; \
+            exit 1; \
+        fi; \
+    done; \
+    if [ "$CSP_GOOGLE_DRIVE_PICKER" = "true" ]; then \
+        if ! grep -q '__CSP_DRIVE_FRAME__' "$CONF"; then \
+            echo "ERROR: CSP_GOOGLE_DRIVE_PICKER=true needs CSP_GOOGLE_SIGN_IN=true"; \
+            exit 1; \
+        fi; \
+        D_SCRIPT=" https://apis.google.com"; \
+        D_CONNECT=" https://www.googleapis.com"; \
+        D_FRAME=" https://docs.google.com"; \
+    elif [ -z "$CSP_GOOGLE_DRIVE_PICKER" ] || [ "$CSP_GOOGLE_DRIVE_PICKER" = "false" ]; then \
+        D_SCRIPT=""; D_CONNECT=""; D_FRAME=""; \
+    else \
+        echo "ERROR: CSP_GOOGLE_DRIVE_PICKER must be true, false or unset, not '$CSP_GOOGLE_DRIVE_PICKER'"; \
+        exit 1; \
+    fi; \
+    sed -i \
+        -e "s#__CSP_DRIVE_SCRIPT__#${D_SCRIPT}#g" \
+        -e "s#__CSP_DRIVE_CONNECT__#${D_CONNECT}#g" \
+        -e "s#__CSP_DRIVE_FRAME__#${D_FRAME}#g" \
+        "$CONF"; \
+    if grep -q '__CSP_DRIVE_' "$CONF"; then \
+        echo "ERROR: a __CSP_DRIVE_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP Google Drive picker sources: '${D_SCRIPT}'"
+
+# Media links (src/pages/MediaPage.tsx) show a video in its host's own player,
+# in a frame: YouTube's (youtube-nocookie.com), Vimeo's (player.vimeo.com) or
+# Google Drive's (drive.google.com). The same three origins the backend builds
+# a player address on (EMBED_ORIGINS in backend/src/utils/media.rs) and the
+# page checks (MEDIA_EMBED_ORIGINS in src/utils/media.ts). Only the image that
+# serves short links for a deployment with media links sets
+# CSP_MEDIA_EMBEDS=true; without it both markers become nothing and the policy
+# is exactly what it was. Which marker is there was decided by the Google
+# sign-in step above: the players join that step's frame-src when there is
+# one, and otherwise get the policy's only frame-src, with 'self' in it so
+# that the page's own frames stay allowed as they are under default-src.
+ARG CSP_MEDIA_EMBEDS
+RUN set -e; \
+    CONF=/etc/nginx/conf.d/default.conf; \
+    if ! grep -q -e '__CSP_MEDIA_SOURCES__' -e '__CSP_MEDIA_DIRECTIVE__' "$CONF"; then \
+        echo "ERROR: no __CSP_MEDIA_ placeholder found in nginx.conf"; \
+        exit 1; \
+    fi; \
+    if [ "$CSP_MEDIA_EMBEDS" = "true" ]; then \
+        M_SOURCES=" https://www.youtube-nocookie.com https://player.vimeo.com https://drive.google.com"; \
+        M_DIRECTIVE=" frame-src 'self'${M_SOURCES};"; \
+    elif [ -z "$CSP_MEDIA_EMBEDS" ] || [ "$CSP_MEDIA_EMBEDS" = "false" ]; then \
+        M_SOURCES=""; M_DIRECTIVE=""; \
+    else \
+        echo "ERROR: CSP_MEDIA_EMBEDS must be true, false or unset, not '$CSP_MEDIA_EMBEDS'"; \
+        exit 1; \
+    fi; \
+    sed -i \
+        -e "s#__CSP_MEDIA_SOURCES__#${M_SOURCES}#g" \
+        -e "s#__CSP_MEDIA_DIRECTIVE__#${M_DIRECTIVE}#g" \
+        "$CONF"; \
+    if grep -q '__CSP_MEDIA_' "$CONF"; then \
+        echo "ERROR: a __CSP_MEDIA_ placeholder is still present after substitution"; \
+        exit 1; \
+    fi; \
+    echo "CSP media embed sources: '${M_SOURCES}'"
 
 # Build stage - use full Node image for Puppeteer/Chromium support
 FROM node:22-slim AS builder
@@ -65,9 +222,19 @@ COPY . .
 # Set build-time environment variables (API URLs are baked in at build time)
 ARG VITE_API_URL
 ARG VITE_FRONTEND_URL
+# "lnp" for the Leadership Now Project theme (themes/lnp.js, themes/lnp/public).
+ARG VITE_THEME
+# "true" for a host that serves only what a short link's visitor sees (the
+# password page, the interstitial, the Secure View viewer): the header is then
+# the logo alone, with no sign-in links and no account menu.
+ARG VITE_PUBLIC_LINKS_ONLY
 
 ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_FRONTEND_URL=$VITE_FRONTEND_URL
+ENV VITE_THEME=$VITE_THEME
+ENV VITE_PUBLIC_LINKS_ONLY=$VITE_PUBLIC_LINKS_ONLY
+# A theme's own logo and icons replace the stock ones in public/.
+RUN if [ -n "$VITE_THEME" ] && [ -d "themes/$VITE_THEME/public" ]; then cp -r "themes/$VITE_THEME/public/." public/; fi
 
 # Build the application with prerendering. The Playwright Chromium path
 # contains a version segment, so resolve it at build time; puppeteer picks it

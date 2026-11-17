@@ -107,8 +107,36 @@ impl Related<super::link_tags::Entity> for Entity {
 
 impl ActiveModelBehavior for ActiveModel {}
 
+/// What `original_url` starts with on a link that serves an uploaded file.
+/// The rest is the `link_files` id. It is not a destination and is never sent
+/// to a visitor: `GET /{code}` answers such a link with a short-lived signed
+/// URL made for that request. No ordinary link can carry it, because
+/// `links::validate_url` accepts only `http` and `https`.
+pub const FILE_LINK_PREFIX: &str = "opn-file:";
+
+/// The `original_url` of the link that serves `link_files` row `file_id`.
+pub fn file_link_marker(file_id: i32) -> String {
+    format!("{FILE_LINK_PREFIX}{file_id}")
+}
+
 // Helper methods
 impl Model {
+    /// Whether this link serves an uploaded file instead of redirecting to a
+    /// URL. Such a link is never cached, cloned or given a new destination.
+    pub fn is_file(&self) -> bool {
+        self.original_url.starts_with(FILE_LINK_PREFIX)
+    }
+
+    /// The destination as an API response, an export or a mail shows it: the
+    /// URL, or nothing for a file link (its marker means nothing to a reader).
+    pub fn shown_url(&self) -> &str {
+        if self.is_file() {
+            ""
+        } else {
+            &self.original_url
+        }
+    }
+
     /// Check if link is deleted (soft delete)
     pub fn is_deleted(&self) -> bool {
         self.deleted_at.is_some()

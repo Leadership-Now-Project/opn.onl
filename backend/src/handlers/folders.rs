@@ -117,7 +117,7 @@ async fn can_edit_folder(
 pub async fn create_folder(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<CreateFolderRequest>,
+    Json(mut payload): Json<CreateFolderRequest>,
 ) -> Result<(StatusCode, Json<FolderResponse>), (StatusCode, Json<serde_json::Value>)> {
     let user_id = get_user_id_from_header(&state.db, &headers)
         .await
@@ -127,6 +127,12 @@ pub async fn create_folder(
                 Json(serde_json::json!({"error": "Unauthorized"})),
             )
         })?;
+
+    // A member of the default organization keeps their folders there, where
+    // their links are.
+    if payload.org_id.is_none() {
+        payload.org_id = crate::handlers::default_org::home_org(&state.db, user_id).await;
+    }
 
     // Org folders can only be created by members with edit rights (not viewers).
     if let Some(org_id) = payload.org_id
@@ -211,7 +217,13 @@ pub async fn get_folders(
 
     let mut folder_query = folders::Entity::find();
 
-    if let Some(org_id) = query.org_id {
+    // With no organization named, a member of the default organization lists
+    // its folders: that is where theirs are.
+    let org_id = match query.org_id {
+        Some(org_id) => Some(org_id),
+        None => crate::handlers::default_org::home_org(&state.db, user_id).await,
+    };
+    if let Some(org_id) = org_id {
         // Verify user is member of this org before listing its folders
         use crate::entity::org_members;
         let is_member = org_members::Entity::find()
@@ -725,14 +737,14 @@ pub async fn get_folder_links(
     let base_url = crate::handlers::links::get_base_url();
     let api_url = crate::handlers::links::get_api_url();
     let mut responses = Vec::new();
-    for l in links_list {
+    for l in &links_list {
         let link_tags = tags_by_link.remove(&l.id).unwrap_or_default();
         responses.push(crate::handlers::links::LinkResponse {
             id: l.id,
             code: l.code.clone(),
             short_url: format!("{}/{}", base_url, l.code),
             api_url: format!("{}/{}", api_url, l.code),
-            original_url: l.original_url.clone(),
+            original_url: l.shown_url().to_string(),
             title: l.title.clone(),
             click_count: l.click_count,
             created_at: utc_rfc3339(l.created_at),
@@ -752,8 +764,21 @@ pub async fn get_folder_links(
             is_active: l.is_active(),
             is_pinned: l.is_pinned,
             tags: link_tags,
+            created_by: None,
+            can_delete: None,
+            file: None,
+            drive: None,
+            media: None,
         });
     }
+    crate::handlers::links::attach_file_info(&state.db, &links_list, &mut responses)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            )
+        })?;
 
     Ok(link_page(total, responses))
 }

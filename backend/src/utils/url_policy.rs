@@ -224,6 +224,77 @@ pub fn validate_http_https_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ------------------------------------------------- how a destination is written
+
+/// Whether `url` is an `http`/`https` address written out the ordinary way:
+/// the scheme, `://`, then the host, with no backslash standing in for a slash
+/// and no space after it.
+///
+/// The URL parser is more forgiving than that. It reads `https:host/x`,
+/// `https:/host/x`, `https:\\host\x` and `https:///host/x` all as
+/// `https://host/x`, and every check on a destination is run on that host.
+/// But a browser handed `https:host/x` in a `Location` header (or in a page)
+/// resolves it against the address it is on, and opens a page of our own site
+/// that does not exist. So text that is not written out is never kept or sent
+/// as typed: see [`well_formed_destination`].
+///
+/// Twin: `isWrittenOutHttpUrl` in `frontend/src/utils/destination.ts`. Change the
+/// two together.
+pub fn is_written_out_http_url(url: &str) -> bool {
+    let Some(rest) =
+        after_ignoring_case(url, "https://").or_else(|| after_ignoring_case(url, "http://"))
+    else {
+        return false;
+    };
+    // A backslash after `?` or `#` is data and the parser leaves it alone.
+    let host_and_path = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    !host_and_path.is_empty()
+        && !rest.starts_with('/')
+        && !host_and_path.contains('\\')
+        && !url.ends_with(' ')
+}
+
+fn after_ignoring_case<'a>(url: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = url.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &url[prefix.len()..])
+}
+
+/// The spelling a destination is stored in and redirected to.
+///
+/// An address that is written out ([`is_written_out_http_url`]) is kept
+/// exactly as it was typed, so `https://iana.org` stays `https://iana.org`.
+/// Any other text the parser reads as an `http`/`https` address with a host
+/// comes back in the parser's own spelling (`https:iana.org/x` becomes
+/// `https://iana.org/x`). Anything else is returned unchanged: it is for the
+/// caller's checks to refuse.
+///
+/// `validate_url` stores this; `destination_redirect` runs a stored
+/// destination through it again on the way out, for a row written before the
+/// rule. Applying it twice changes nothing.
+pub fn well_formed_destination(url: &str) -> std::borrow::Cow<'_, str> {
+    if is_written_out_http_url(url) {
+        return std::borrow::Cow::Borrowed(url);
+    }
+    match url::Url::parse(url) {
+        Ok(parsed)
+            if matches!(parsed.scheme(), "http" | "https")
+                && parsed.host_str().is_some_and(|host| !host.is_empty()) =>
+        {
+            std::borrow::Cow::Owned(parsed.into())
+        }
+        _ => std::borrow::Cow::Borrowed(url),
+    }
+}
+
+/// Whether two destinations are the same address, however each is spelled:
+/// the same text, or the same address once the parser has read both. An older
+/// row holding `https:iana.org/x` is the same destination as
+/// `https://iana.org/x`, and `https://IANA.org` as `https://iana.org/`.
+pub fn same_destination(a: &str, b: &str) -> bool {
+    a == b || matches!((url::Url::parse(a), url::Url::parse(b)), (Ok(a), Ok(b)) if a == b)
+}
+
 /// One-line, human-readable reason a URL looks like abuse, or `None` if it does
 /// not trip any detector. Used by the admin panel to label links.
 pub fn suspicion_reason(url: &str) -> Option<String> {
@@ -251,6 +322,118 @@ pub fn suspicion_reason(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Text the parser reads as an http(s) address but a browser would not:
+    /// each comes back in the parser's spelling, with `//` after the scheme.
+    #[test]
+    fn a_destination_that_is_not_written_out_comes_back_in_the_parsers_spelling() {
+        for (typed, stored) in [
+            ("https:iana.org/probe", "https://iana.org/probe"),
+            ("https:/iana.org/probe", "https://iana.org/probe"),
+            ("https:///iana.org/probe", "https://iana.org/probe"),
+            ("https:////iana.org/probe", "https://iana.org/probe"),
+            ("http:iana.org", "http://iana.org/"),
+            ("http:/iana.org/a?b=1#c", "http://iana.org/a?b=1#c"),
+            ("https:\\\\iana.org\\probe", "https://iana.org/probe"),
+            ("https:/\\iana.org/probe", "https://iana.org/probe"),
+            ("https://iana.org\\probe", "https://iana.org/probe"),
+            ("https://iana.org/a\\b", "https://iana.org/a/b"),
+            ("HTTPS:IANA.org/Probe", "https://iana.org/Probe"),
+            (" https://iana.org/probe", "https://iana.org/probe"),
+            ("https://iana.org/probe ", "https://iana.org/probe"),
+        ] {
+            assert!(!is_written_out_http_url(typed), "{typed:?}");
+            assert_eq!(well_formed_destination(typed), stored, "{typed:?}");
+            // What is stored is written out, and reads back as itself.
+            assert!(is_written_out_http_url(stored), "{stored:?}");
+            assert_eq!(well_formed_destination(stored), stored);
+            assert!(same_destination(typed, stored), "{typed:?}");
+        }
+    }
+
+    /// An address written out the ordinary way is kept exactly as typed, also
+    /// where the parser would spell it differently. Each line pins one such
+    /// difference, so a change of rule (or of parser) is noticed.
+    #[test]
+    fn a_written_out_destination_is_kept_exactly_as_typed() {
+        for (typed, parsers) in [
+            ("https://iana.org", "https://iana.org/"),
+            ("http://iana.org", "http://iana.org/"),
+            ("https://IANA.org/Probe", "https://iana.org/Probe"),
+            ("HTTPS://iana.org/probe", "https://iana.org/probe"),
+            ("https://iana.org:443/probe", "https://iana.org/probe"),
+            ("http://iana.org:80/probe", "http://iana.org/probe"),
+            ("https://bücher.de/a", "https://xn--bcher-kva.de/a"),
+            ("https://iana.org/a b", "https://iana.org/a%20b"),
+            ("https://iana.org/a/../b", "https://iana.org/b"),
+            ("https://iana.org/é", "https://iana.org/%C3%A9"),
+            ("https://iana.org./probe", "https://iana.org./probe"),
+            (
+                "https://iana.org/probe?x=a\\b#c\\d",
+                "https://iana.org/probe?x=a\\b#c\\d",
+            ),
+            ("https://iana.org/%7Euser", "https://iana.org/%7Euser"),
+            ("https://user@iana.org/probe", "https://user@iana.org/probe"),
+        ] {
+            assert!(is_written_out_http_url(typed), "{typed:?}");
+            assert_eq!(well_formed_destination(typed), typed, "{typed:?}");
+            assert_eq!(
+                url::Url::parse(typed).unwrap().as_str(),
+                parsers,
+                "the parser's spelling of {typed:?}"
+            );
+            assert!(same_destination(typed, parsers), "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn text_that_is_no_http_address_is_left_for_the_checks_to_refuse() {
+        for text in [
+            "",
+            "iana.org",
+            "//iana.org/probe",
+            "https:",
+            "https:/",
+            "https://",
+            "https:///",
+            "ftp:iana.org",
+            "javascript:alert(1)",
+            "opn-file:12",
+            "mailto:someone@iana.org",
+        ] {
+            assert!(!is_written_out_http_url(text), "{text:?}");
+            assert_eq!(well_formed_destination(text), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn two_destinations_are_the_same_only_when_they_are_the_same_address() {
+        assert!(same_destination("opn-file:12", "opn-file:12"));
+        assert!(same_destination("not a url", "not a url"));
+        assert!(!same_destination("not a url", "also not a url"));
+        assert!(!same_destination("opn-file:12", "opn-file:13"));
+        assert!(!same_destination(
+            "https://iana.org/a",
+            "https://iana.org/b"
+        ));
+        assert!(!same_destination("https://iana.org/a", "http://iana.org/a"));
+        assert!(!same_destination(
+            "https://iana.org/a",
+            "https://iana.org/A"
+        ));
+        assert!(!same_destination(
+            "https://iana.org/a",
+            "https://iana.org/a?x=1"
+        ));
+        assert!(!same_destination(
+            "https://iana.org/a",
+            "https://iana.org/a#x"
+        ));
+        assert!(!same_destination(
+            "https://iana.org/a",
+            "https://iana.org/a/"
+        ));
+    }
 
     #[test]
     fn flags_hta_with_news_lure_query() {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
+import { IS_LNP } from '../config/theme';
 import { motion } from 'framer-motion';
 import { CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { Helmet } from 'react-helmet-async';
@@ -123,7 +124,7 @@ export default function VerifyEmail() {
                   Go to login
                 </Link>
                 <Link
-                  to="/"
+                  to="/" reloadDocument={IS_LNP}
                   className="flex w-full items-center justify-center rounded-xl border border-line2 bg-surface py-3 font-medium text-ink transition-colors hover:border-ink/30"
                 >
                   Go to homepage
